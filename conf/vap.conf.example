@@ -1,0 +1,6 @@
+[Configuration]
+processing_dir = /opt/OSU_ScreenSign_System/data
+touch_bin = /usr/bin/touch
+mkdir_bin = /usr/bin/mkdir
+rm_bin = /usr/bin/rm
+mv_bin = /usr/bin/mv
