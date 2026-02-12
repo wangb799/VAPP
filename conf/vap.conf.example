@@ -4,3 +4,26 @@ touch_bin = /usr/bin/touch
 mkdir_bin = /usr/bin/mkdir
 rm_bin = /usr/bin/rm
 mv_bin = /usr/bin/mv
+input = input_dir
+segment-bin = segment
+ai-model = yolo
+weights = plankton.pt
+modelopt = 
+environmental = 
+output = 
+gpu = 0
+verbose = False
+
+[Segmentation]
+delta=4
+min-area=50
+max-area=400000
+threshold=160
+signal-to-noise=60
+outlier-percent=0.15
+variation=100
+epsilon=1
+top-crop=0
+bottom-crop=0
+left-crop=66
+right-crop=23
