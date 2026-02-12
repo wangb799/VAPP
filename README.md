@@ -57,15 +57,35 @@ Using VAP Pipeline
  directory and microsoft path folder in the configuration file but we have 
  command line options for those settings as well for testing purposes. 
 
-        Usage:
+    Usage:
 
-        vap.py -c <config_file> -d <processing_dir> -o <output_dir> -h -v
+   usage: vap.py [-h] --input INPUT --segment-bin SEGMENT_BIN --model MODEL --environmental ENVIRONMENTAL
+          --output OUTPUT [--gpu GPU] [--verbose] [--delta DELTA] [--min-area MIN_AREA]
+          [--max-area MAX_AREA] [--threshold THRESHOLD] [--signal-to-noise SIGNAL_TO_NOISE]
+          [--outlier-percent OUTLIER_PERCENT] [--variation VARIATION] [--epsilon EPSILON]
+          [--top-crop TOP_CROP] [--bottom-crop BOTTOM_CROP] [--left-crop LEFT_CROP]
+          [--right-crop RIGHT_CROP]
+   -h, --help            show this help message and exit
+   --input INPUT         Input folder containing AVI files
+   --segment-bin SEGMENT_BIN Path to segmentation binary
+   --model MODEL         YOLO model path (.pt)
+   --environmental ENVIRONMENTAL Path to environmental data directory (publisher subdirs inside)
+   --output OUTPUT       Output directory (will contain segment/, classify/, merge/)
+   --gpu GPU             GPU ID (default: 0)
+   --verbose             Enable verbose output
+   --delta DELTA         Segmentation parameter -d / --delta (Default: 4)
+   --min-area MIN_AREA   Segmentation parameter -m / --minArea (Default: 50)
+   --max-area MAX_AREA   Segmentation parameter -M / --maxArea (Default: 400000)
+   --threshold THRESHOLD Segmentation parameter -T / --threshold (Default: 160)
+   --signal-to-noise SIGNAL_TO_NOISE Segmentation parameter -s / --signal-to-noise (Default: 60)
+   --outlier-percent OUTLIER_PERCENT Segmentation parameter -p / --outlier-percent (Default: 0.15)
+   --variation VARIATION Segmentation parameter -v / --variation (Default: 100)
+   --epsilon EPSILON     Segmentation parameter -e / --epsilon (Default: 1)
+   --top-crop TOP_CROP   Segmentation parameter -t / --top-crop (Default: 0)
+   --bottom-crop BOTTOM_CROP Segmentation parameter -b / --bottom-crop (Default: 0)
+   --left-crop LEFT_CROP Segmentation parameter -l / --left-crop (Default: 66)
+   --right-crop RIGHT_CROP Segmentation parameter -r / --right-crop (Default: 23)
 
-        -c The Confiuration file path (default: <install_dir>/conf/signs.conf)
-        -d The data processing directory for holding the data (local)
-        -o The MicrosoftShare data for sync (local)
-        -v Verbose mode / Print dialog
-        -h Help message 
 
  The processing tool will sync data down to the output_dir entry in the 
  configuration file. Once the data is synced the system will make a working
