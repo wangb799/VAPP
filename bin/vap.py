@@ -755,6 +755,7 @@ def menu():
     parser.add_argument("-en","--environmental", type=directory, required=True, help="Path to environmental data directory (publisher subdirs inside)")
     parser.add_argument("-o","--output", required=True, help="Output directory (will contain segmentation/, classification/, merge/)")
     parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
+    parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
     parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
 
     #####################################################################
