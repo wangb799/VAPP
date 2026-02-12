@@ -1,5 +1,4 @@
 [Configuration]
-processing_dir = /opt/OSU_ScreenSign_System/data
 touch_bin = /usr/bin/touch
 mkdir_bin = /usr/bin/mkdir
 rm_bin = /usr/bin/rm
@@ -9,8 +8,8 @@ segment-bin = segment
 ai-model = yolo
 weights = plankton.pt
 modelopt = 
-environmental = 
-output = 
+environmental = env_dir
+output = output_dir
 gpu = 0
 verbose = False
 
