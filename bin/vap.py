@@ -775,25 +775,7 @@ def menu():
 
     global args
     args = parser.parse_args()
-#    seg_flag_map = {
-#        "delta": "-d",
-#        "min_area": "-m",
-#        "max_area": "-M",
-#        "threshold": "-T",
-#        "signal_to_noise": "-s",
-#        "outlier_percent": "-p",
-#        "variation": "-v",
-#        "epsilon": "-e",
-#        "top_crop": "-t",
-#        "bottom_crop": "-b",
-#        "left_crop": "-l",
-#        "right_crop": "-r",
-#    }
 
-#    seg_kv_args = []
-#    for attr, short_flag in seg_flag_map.items():
-#        val = getattr(args, attr)
-#        seg_kv_args.extend([short_flag, str(val)])
 
 #####################################################################
 # Main                                                              #
