@@ -42,6 +42,7 @@ import glob
 import argparse
 import subprocess
 import shutil
+import textwrap
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -120,7 +121,7 @@ def get_files(dir_path):
     files = [f for f in files if os.path.isfile(f)]
     files.sort()
     if len(files) <= 0:
-        print(f"\t\t{RED}Error:{C_END} No files found in directory {dir_path}", file=sys.stderr)
+        print(f"\t\t{RED}  Error:{C_END} No files found in directory {dir_path}", file=sys.stderr)
         sys.exit(1)
     return files
 
@@ -160,7 +161,7 @@ class DoubleGen:
 
 def dir_double_gen(directory, fieldnames=None, delimiter=',', header_lines=1):
     if not os.path.exists(directory):
-        print(f"\t\t{RED}Error:{C_END} directory not valid for the generator: {directory}", file=sys.stderr)
+        print(f"\t\t{RED}  Error:{C_END} directory not valid for the generator: {directory}", file=sys.stderr)
         sys.exit(1)
     files = get_files(directory)
     prev_next = None
@@ -219,7 +220,7 @@ def check_env_header(directory, expected_header, delimiter=","):
                  if os.path.isfile(os.path.join(directory, f))]
     env_files.sort()
     if not env_files:
-        print(f"\t\t{RED}Error:{C_END} No files in {directory}", file=sys.stderr)
+        print(f"\t\t{RED}  Error:{C_END} No files in {directory}", file=sys.stderr)
         sys.exit(1)
 
     header_file = env_files[0]
@@ -234,7 +235,7 @@ def check_env_header(directory, expected_header, delimiter=","):
             found_header[0] = "Time"
 
         if found_header != expected_header:
-            print(f"\t\t{RED}Error:{C_END}Headers do not match for {directory}\n"
+            print(f"\t\t{RED}  Error:{C_END}Headers do not match for {directory}\n"
                   f"\t\t\tExpected: {expected_header}\n"
                   f"\t\t\tFound:    {found_header}",
                   file=sys.stderr)
@@ -297,7 +298,7 @@ def merge_environmental(environmental_dir, output_dir=None, header_lines=0, verb
                 d = d2
         check_env_header(d, header)
     if verbose:
-        print("\t\t{WHITE} Info:{C_END} Environmental headers verified. Merging publishers")
+        print(f"\t\t{WHITE}   Info:{C_END} Environmental headers verified. Merging publishers")
 
     # Build output fieldnames: Time + all non-Time non-Checksum from others + Latitude/Longitude last
     merged_fields = ["Time"] + [
@@ -327,7 +328,7 @@ def merge_environmental(environmental_dir, output_dir=None, header_lines=0, verb
             try:
                 l, n = next(dg)
             except StopIteration:
-                print(f"\t\t{RED}Error:{C_END} {other_publishers[j][0]} empty.", file=sys.stderr)
+                print(f"\t\t{RED}  Error:{C_END} {other_publishers[j][0]} empty.", file=sys.stderr)
                 return out_file
             last_rows.append(l); next_rows.append(n)
 
@@ -404,7 +405,7 @@ def merge_environmental(environmental_dir, output_dir=None, header_lines=0, verb
             env_writer.writerow(merged_row)
 
     if verbose:
-        print(f"\t\t{WHITE} Info:{C_END} Created Environmental Merge File: {out_file}")
+        print(f"\t\t{WHITE}   Info:{C_END} Created Environmental Merge File: {out_file}")
     return out_file
 
 #####################################################################
@@ -420,10 +421,10 @@ def run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args=None, verbo
     avis = glob.glob(os.path.join(input_dir, "*.avi"))
 
     if not avis:
-        raise FileNotFoundError(f"\t\t{RED}Error:{C_END} No .avi files found in {input_dir}")
+        raise FileNotFoundError(f"\t\t\t{RED}  Error:{C_END} No .avi files found in {input_dir}")
 
     if verbose:
-        print(f"\t\t{WHITE} Info:{C_END} Segmenting {len(avis)} avi videos files")
+        print(f"\t\t\t{WHITE}   Info:{C_END} Segmenting {len(avis)} avi videos files")
 
     for avi in avis:
         avi_base = os.path.splitext(os.path.basename(avi))[0]
@@ -435,7 +436,8 @@ def run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args=None, verbo
             cmd.extend(seg_kv_args)
 
         if verbose:
-            print(f"\t\t{WHITE} Info:{C_END} Running:", " ".join(map(str, cmd)))
+            #print(f"\t\t\t{PURP}Running:{C_END}", " ".join(map(str, cmd)))
+            print(f"\t\t\t{PURP}Running:{C_END} ", avi)
 
         subprocess.run(cmd, check=True)
         # also copy  measurement csv per avi into measurements root
@@ -443,7 +445,7 @@ def run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args=None, verbo
             out_measure = os.path.join(avi_out, avi_base, "measurements", f"{avi_base}.csv")
             shutil.copy2(out_measure, os.path.join(measure_root, f"{avi_base}_measure.csv"))
         except Exception as e:
-            print(f"\t\t{RED}Error:{C_END} Could Not Copy {out_measure}: {e}")
+            print(f"\t\t\t{RED}  Error:{C_END} Could Not Copy {out_measure}: {e}")
 
     return seg_root, len(avis)
 
@@ -458,8 +460,11 @@ def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
             break
     else:
         raise FileNotFoundError(
-            print(f"\t\t{RED}Error:{C_END} No image files found in directory: {corrected_crop_dir}")
+            print(f"\t\t\t{RED}  Error:{C_END} No image files found in directory: {corrected_crop_dir}")
         )
+
+    if verbose:
+        print(f"\t\t\t{PURP}Running:{C_END} ", corrected_crop_dir)
 
     # prediction over a folder
     use_half = supports_half(gpu)
@@ -487,7 +492,7 @@ def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
                 wrote_header = True
             writer.writerow([fname] + prob_list)
             if verbose and n % 10000 == 0:
-                print(f"\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
+                print(f"\t\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
     return n
 
 def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
@@ -497,7 +502,7 @@ def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
 
     avi_dirs = [d for d in glob.glob(os.path.join(seg_root, "*")) if os.path.isdir(d)]
     if verbose:
-        print(f"\t\t{WHITe} Info:{C_END} Classifying {len(avi_dirs)} avi crop folders")
+        print(f"\t\t\t{WHITE}   Info:{C_END} Classifying {len(avi_dirs)} avi crop folders")
 
     total_imgs = 0
     for avi_dir in avi_dirs:
@@ -505,7 +510,7 @@ def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
         corrected_crop = os.path.join(avi_dir, "segmentation", "corrected_crop")
         if not os.path.isdir(corrected_crop):
             if verbose:
-                print(f"\t\t{YELGRN}Warning:{C_END} Skipping {avi_base}: no corrected_crop found")
+                print(f"\t\t\t{YELGRN}Warning:{C_END} Skipping {avi_base}: no corrected_crop found")
             continue
         out_csv = os.path.join(avi_dir, f"{avi_base}_classification.csv")
         n = classify_one_avi(model, corrected_crop, out_csv, gpu, verbose=verbose)
@@ -516,7 +521,7 @@ def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
             try:
                 shutil.copy2(out_csv, os.path.join(class_root, os.path.basename(out_csv)))
             except Exception as e:
-                print(f"\t\t{RED}Error:{C_END} Could Not Copy {out_csv}: {e}")
+                print(f"\t\t\t{RED}  Error:{C_END} Could Not Copy {out_csv}: {e}")
     return class_root, total_imgs
 
 #####################################
@@ -618,7 +623,7 @@ def build_occurrence(output_dir, verbose=False):
             measure_file = os.path.join(measure_root, f"{avi}_measure.csv")
             if not os.path.exists(class_csv) or not os.path.exists(measure_file):
                 if verbose: 
-                    print(f"\t\t{YELGRN}Warning:{C_END} Measurement File Missing For {avi}: {measure_file}")
+                    print(f"\t\t\t{YELGRN}Warning:{C_END} Measurement File Missing For {avi}: {measure_file}")
                 return None
 
             mdict, mheader = create_measure_dict(avi, measure_root)
@@ -650,7 +655,7 @@ def build_occurrence(output_dir, verbose=False):
                     measure_data[1] = os.path.basename(measure_data[1])
                     if measure_data == "error":
                         if verbose: 
-                            print(f"\t\t{RED}Error:{C_END} Missing Measurement For {image_name}")
+                            print(f"\t\t\t{RED}  Error:{C_END} Missing Measurement For {image_name}")
                         continue
 
                     writer.writerow(measure_data + [predicted_taxon, f"{probability:.6f}"])
@@ -704,7 +709,7 @@ def create_final(input_dir, output_dir, occurrence_file, environmental_file, max
                 last_occ_time = parse_iso_like(last_occ_row["time"])
                 if last_occ_time > occ_time:
                     if verbose: 
-                        print(f"\t\t{RED}Warning:{C_END} occurrence time decreased at line {line_num}")
+                        print(f"\t\t\t{YELGRN}Warning:{C_END} Occurrence time decreased at line {line_num}")
                     env_ptr.restart()
                     last_env_row, next_env_row = next(env_ptr)
                     next_env_time = get_time_env_like(next_env_row)
@@ -714,7 +719,7 @@ def create_final(input_dir, output_dir, occurrence_file, environmental_file, max
                     last_env_row, next_env_row = next(env_ptr)
                 except StopIteration:
                     if verbose: 
-                        print("\t\t{RED}Warning:{C_END} environmental data exhausted")
+                        print("\t\t\t{YELGRN}Warning:{C_END} Environmental data exhausted")
                     break
                 next_env_time = get_time_env_like(next_env_row)
 
@@ -738,25 +743,32 @@ def create_final(input_dir, output_dir, occurrence_file, environmental_file, max
             last_occ_row = occ_row
 
     if verbose:
-        print(f"\t\t{WHITE} Info:{C_END} Final merged file: {final_output}")
+        print(f"\t\t\t{WHITE}   Info:{C_END} Final merged file: {final_output}")
     return final_output
 
 #####################################################################
 # Menu                                                              #
 #####################################################################
+class CustomArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # Customize the error message format
+        print(f"ERROR: {self.prog}: {message}", file=sys.stderr)
+        # Optionally print the help message
+        self.print_help(sys.stderr)
+        # Exit with a custom status code (e.g., 2)
+        sys.exit(2) 
 
 def menu():
-    parser = argparse.ArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file -> final merge")
+    parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
     parser.add_argument("-i","--input", type=directory, required=True, help="Input folder containing AVI files")
     parser.add_argument("-sb","--segment-bin", required=True, help="Path to segmentation binary")
     parser.add_argument("-ai","--ai-model", required=True, help="AI model (yolo,inceptionv3,megadetector,U-Net)")
     parser.add_argument("-mw","--weights", required=True, help="Model weights file (.weights,.pt)")
-    parser.add_argument("-mo","--modelopt", required=True, help="Model Advanced Option (Extra option for the model)")
+    parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     parser.add_argument("-en","--environmental", type=directory, required=True, help="Path to environmental data directory (publisher subdirs inside)")
     parser.add_argument("-o","--output", required=True, help="Output directory (will contain segmentation/, classification/, merge/)")
     parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
     parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
-    parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
 
     #####################################################################
     # Segmentation parameters                                           #
@@ -774,14 +786,15 @@ def menu():
     parser.add_argument("-l","--left-crop", type=str, default="66", help="Segmentation parameter -l / --left-crop (Default: 66)")
     parser.add_argument("-r","--right-crop", type=str, default="23", help="Segmentation parameter -r / --right-crop (Default: 23)")
 
+    parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument('-help', action="help", help="Help Message")
+
     global args
     args = parser.parse_args()
-
 
 #####################################################################
 # Main                                                              #
 #####################################################################
-
 def main():
 
     #####################################################################
@@ -791,6 +804,26 @@ def main():
     #####################################################################
     menu()
     t0 = datetime.now()
+
+    seg_flag_map = {
+        "delta": "-d",
+        "min_area": "-m",
+        "max_area": "-M",
+        "threshold": "-T",
+        "signal_to_noise": "-s",
+        "outlier_percent": "-p",
+        "variation": "-v",
+        "epsilon": "-e",
+        "top_crop": "-t",
+        "bottom_crop": "-b",
+        "left_crop": "-l",
+        "right_crop": "-r",
+    }
+
+    seg_kv_args = []
+    for attr, short_flag in seg_flag_map.items():
+        val = getattr(args, attr)
+        seg_kv_args.extend([short_flag, str(val)])
 
     #####################################################################
     # Start the run                                                     #
@@ -816,12 +849,14 @@ def main():
     env_merged_path = os.path.join(args.environmental, "merged_environmental.csv")
     if file_empty(env_merged_path):
         if args.verbose:
-            print(f"\t\t\t {WHITE}Info{C_END}: No merged environmental file found; building merged_environmental.csv ...")
+            print(f"\t\t\t   {WHITE}Info:{C_END} No merged environmental file found; building merged_environmental.csv ...")
         env_out_file = merge_environmental(args.environmental, output_dir=args.environmental, header_lines=0, verbose=args.verbose)
-        env_out_file = ""
+        #env_out_file = ""
     else:
         if args.verbose:
-            print(f"\t\t\t {WHITE}Info{C_END}: Found existing merged_environmental.csv — skipping environmental merge.")
+            print(f"\t\t\t   {WHITE}Info:{C_END} Found existing merged_environmental.csv — skipping environmental merge.")
+        environmental_dir = os.path.abspath(args.environmental)
+        env_out_file = os.path.join(environmental_dir, "merged_environmental.csv")
 
 
 
@@ -840,7 +875,7 @@ def main():
     #####################################################################
     if args.verbose:
         print(f"\t\t{WHITE}[2/4]{C_END} Classification")
-    class_root, n_imgs = run_classification(args.model, seg_root, args.output, args.gpu, args.verbose)
+    class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
 
 
 
@@ -849,19 +884,19 @@ def main():
     #####################################################################
     if args.verbose:
         print(f"\t\t{WHITE}[3/4]{C_END} Occurrence Creation")
-        print(f"\t\t\t {WHITE}Info{C_END}: merging classification with measurement")
+        print(f"\t\t\t   {WHITE}Info:{C_END} Merging classification with measurement")
 
     output_dir = args.output
     measure_root = os.path.join(output_dir, "measurements")
     classi_root = os.path.join(output_dir, "classification")
 
     if os.path.exists(classi_root) and os.path.exists(measure_root):
-        print(f"\t\t\t {WHITE}Info{C_END}: measure_root or classi_root does exist")
+        print(f"\t\t\t   {WHITE}Info:{C_END} The measure_root or classi_root does exist")
         combined_occ = build_occurrence(output_dir, verbose=args.verbose)
     else:
-        print(f"\t\t\t{RED}Error:{C_END} measure_root or classi_root does not exist")
+        print(f"\t\t\t{RED}  Error:{C_END} The measure_root or classi_root does not exist")
         combined_occ = None
-    #    combined_occ = ""
+        #combined_occ = ""
 
 
 
@@ -872,10 +907,10 @@ def main():
         print(f"\t\t{WHITE}[4/4]{C_END} Final Merge of Data")
 
     if os.path.exists(combined_occ) and os.path.exists(env_out_file):
-        print(f"\t\t\t {WHITE}Info{C_END}: we have occurrence files or enviroment files ")
+        print(f"\t\t\t   {WHITE}Info:{C_END} There are occurrence files or environment files ")
         final_csv = create_final(args.input, args.output, combined_occ, env_out_file, max_time_gap=2, verbose=args.verbose)
     else:
-        print(f"\t\t\t{RED}Error:{C_END} missing occurrence files or enviroment files ")
+        print(f"\t\t\t{RED}  Error:{C_END} There are missing occurrence files or environment files ")
         final_csv = None
 
 
@@ -887,13 +922,13 @@ def main():
     # Summary
     print("", file=sys.stdout, flush=True)
     print(f"\t{GREEN}Pipeline complete!{C_END}")
-    print(f"\t\tenvironmental merge: {env_out_file}")
-    print(f"\t\tSegmented files: {n_avi}")
-    print(f"\t\tClassified images counting:    {n_imgs}")
-    print(f"\t\tCombined occurrence: {combined_occ}")
-    print(f"\t\tFinal merged file:   {final_csv}")
-    print(f"\t\tOutput directory:    {args.output}")
-    print(f"\t\tTotal runtime:       {datetime.now() - t0}")
+    print(f"\t\t{WHITE}Environmental Merge:{C_END} {env_out_file}")
+    print(f"\t\t{WHITE}    Segmented files:{C_END} {n_avi}")
+    print(f"\t\t{WHITE}  Classified Images:{C_END} {n_imgs}")
+    print(f"\t\t{WHITE}Combined occurrence:{C_END} {combined_occ}")
+    print(f"\t\t{WHITE}  Final merged file:{C_END} {final_csv}")
+    print(f"\t\t{WHITE}   Output directory:{C_END} {args.output}")
+    print(f"\t\t{WHITE}      Total runtime:{C_END} {datetime.now() - t0}")
     print("", file=sys.stdout, flush=True)
 
     
