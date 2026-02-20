@@ -117,8 +117,7 @@ def combine_pub_csv(dir_path):
     files = [f for f in files if os.path.isfile(f)]
     files.sort()
     if len(files) <= 0:
-        print(f"\t\t{RED}  Error:{C_END} No files found in directory {dir_path}", file=sys.stderr)
-        sys.exit(1)
+        raise FileNotFoundError(f"No files found in directory {dir_path}")
     return files
 
 def _convert_nmea_lat(lat_raw):
@@ -277,8 +276,7 @@ def check_env_header(directory, expected_header, delimiter=","):
                  if os.path.isfile(os.path.join(directory, f))]
     env_files.sort()
     if not env_files:
-        print(f"\t\t{RED}  Error:{C_END} No files in {directory}", file=sys.stderr)
-        sys.exit(1)
+        raise FileNotFoundError(f"No files found in directory: {directory}")
 
     header_file = env_files[0]
     with open(header_file, "r", newline='') as ptr:
@@ -292,11 +290,12 @@ def check_env_header(directory, expected_header, delimiter=","):
             found_header[0] = "Time"
 
         if found_header != expected_header:
-            print(f"\t\t{RED}  Error:{C_END}Headers do not match for {directory}\n"
-                  f"\t\t\tExpected: {expected_header}\n"
-                  f"\t\t\tFound:    {found_header}",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(
+                f"Header mismatch in directory: {directory}\n"
+                f"Expected: {expected_header}\n"
+                f"Found:    {found_header}"
+            )
+
 
 def publisher_iterator(d, header):
     files = combine_pub_csv(d)
@@ -447,11 +446,7 @@ def run_merge_environmental(environmental_dir, output_dir=None, verbose=True):
                 ensure_parsed_time(last_rows[i])
                 ensure_parsed_time(next_rows[i])
 
-                last_time = last_rows[i]["_parsed_time"]
-                next_time = next_rows[i]["_parsed_time"]
-
                 while True:
-                    ensure_parsed_time(next_rows[i])
                     next_time = next_rows[i]["_parsed_time"]
 
                     if next_time is None or inc_time <= next_time:
@@ -463,18 +458,18 @@ def run_merge_environmental(environmental_dir, output_dir=None, verbose=True):
                         ensure_parsed_time(next_rows[i])
                     except StopIteration:
                         break
+                pub_row = last_rows[i]
 
-                # pick closer
-                last_time = last_rows[i]["_parsed_time"]
-                which = closest_time(inc_time, last_time, next_time, max_time_gap=10)
-                if which == "last":
-                    pub_row = last_rows[i]
-                elif which == "next":
-                    pub_row = next_rows[i]
-                else: 
-                    continue
+                #which = closest_time(inc_time, last_time, next_time, max_time_gap=10)
+                #if which == "last":
+                #    pub_row = last_rows[i]
+                #elif which == "next":
+                #    pub_row = next_rows[i]
+                #else: 
+                #    continue
+
                 merged_row.update(pub_row)
-                merged_row["Time"] = inc_time
+            merged_row["Time"] = inc_time
 
             # Normalize Lat/Lon if present
             if "Longitude" in merged_row and "Latitude" in merged_row:
@@ -579,9 +574,9 @@ def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
         if glob.glob(os.path.join(corrected_crop_dir, f"*.{ext}")):
             break
     else:
-        raise FileNotFoundError(
-            print(f"\t\t\t{RED}  Error:{C_END} No image files found in directory: {corrected_crop_dir}")
-        )
+        msg = f"No image files found in directory: {corrected_crop_dir}"
+        print(f"\t\t\t{RED}  Error:{C_END} {msg}")
+        raise FileNotFoundError(msg)
 
     if verbose:	
         print(f"\t\t\t{PURP}Running:{C_END} ", corrected_crop_dir)
@@ -661,6 +656,10 @@ def dec_to_micro(decimal_second):
     else:
         raise ValueError("Unhandled decimal second")
 
+NEW_CAMERA_PATTERN = re.compile(r"(\d{2})-(\d{2})-(\d{2,4})-(\d{2})-(\d{2})-(\d{2})\.(\d{1,3})")
+
+OLD_CAMERA_PATTERN = re.compile(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{1,3})")
+
 def avi_date_parse(avi):
     """
     Parse both new and old camera timestamp formats from .avi names.
@@ -669,7 +668,8 @@ def avi_date_parse(avi):
     """
 
     # New camera format
-    m = re.search(r"(\d{2})-(\d{2})-(\d{2,4})-(\d{2})-(\d{2})-(\d{2})\.(\d{1,3})", avi)
+    #m = re.search(r"(\d{2})-(\d{2})-(\d{2,4})-(\d{2})-(\d{2})-(\d{2})\.(\d{1,3})", avi)
+    m = NEW_CAMERA_PATTERN.search(avi)
     if m:
         month, day, year, h, m_, s, dec_s = m.groups()
         if len(year) == 2:
@@ -681,7 +681,8 @@ def avi_date_parse(avi):
         )
 
     # Old camera format
-    m = re.search(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{1,3})", avi)
+    #m = re.search(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{1,3})", avi)
+    m = OLD_CAMERA_PATTERN.search(avi)
     if m:
         y, day, month, h, m_, s, dec_s = m.groups()
         return datetime(
@@ -699,8 +700,7 @@ def create_measure_dict(avi, measure_dir):
     fps = 19.88 if ("Cam" in avi or "Camera" in avi) else 18.0
     sec_p_frame = 1.0 / fps
     if not os.path.exists(csv_path): 
-        print(f"\t\t{RED}  Error:{C_END} Missing measurement CSV: {csv_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Missing measurement CSV: {csv_path}")
 
     with open(csv_path, "r", encoding="utf-8", newline='') as mf:
         mlines = csv.reader(mf)
@@ -863,6 +863,14 @@ def run_create_final(input_dir, output_dir, occurrence_file, environmental_file,
 
             if last_occ_row is not None:
                 last_occ_time = isoformat_parse(last_occ_row["time"])
+
+                if last_occ_time > occ_time:
+                    raise RuntimeError(
+                        f"Occurrence time decreased at line {line_num}. "
+                        "This should not happen if Occurrence timestamp is in an order."
+                    )
+                
+                """    
                 if last_occ_time > occ_time:
                     if verbose: 
                         print(f"\t\t\t{YELGRN}Warning:{C_END} Occurrence time decreased at line {line_num}")
@@ -871,7 +879,7 @@ def run_create_final(input_dir, output_dir, occurrence_file, environmental_file,
                     ensure_parsed_time(last_env_row)
                     ensure_parsed_time(next_env_row)
                     next_env_time = next_env_row["_parsed_time"]
-
+                """
 
             while True:
                 try:
@@ -886,18 +894,18 @@ def run_create_final(input_dir, output_dir, occurrence_file, environmental_file,
 
                 # If environmental timestamp has caught up
                 if next_env_time is None:
-                    print(f"\t\t\t{RED}  Error:{C_END} DEBUG: next_env_row has bad timestamp:")
-                    print("line:", next_env_row)
-                    print("raw Time:", repr(next_env_row.get("Time")))
-                    print(f"\t\t\t{RED}  Error:{C_END} Stopping debug because next_env_time is None")
-                    sys.exit(1)
+                    raise ValueError(
+                        f"Invalid environmental timestamp.\n"
+                        f"Row: {next_env_row}\n"
+                        f"Raw Time: {repr(next_env_row.get('Time'))}"
+                    )
 
                 if last_env_time is None:
-                    print(f"\t\t\t{RED}  Error:{C_END} DEBUG: last_env_row has bad timestamp:")
-                    print("line:", last_env_row)
-                    print("raw Time:", repr(last_env_row.get("Time")))
-                    print (f"\t\t\t{RED} Error:{C_END} Stopping debug because last_env_time is None")
-                    sys.exit(1)
+                    raise ValueError(
+                        f"Invalid environmental timestamp (last row).\n"
+                        f"Row: {last_env_row}\n"
+                        f"Raw Time: {repr(last_env_row.get('Time'))}"
+                    )
 
                 if occ_time <= next_env_time:
                     break
@@ -951,7 +959,7 @@ class CustomArgumentParser(argparse.ArgumentParser):
 
 def menu():
     parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
-    parser.add_argument("-i","--input", required=False, help="Input folder containing AVI files")
+    parser.add_argument("-i","--input", required=False, help="Input folder containing AVI or segmentation ")
     parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
     parser.add_argument("-ai","--ai-model", required=False, help="AI model (yolo,inceptionv3,megadetector,U-Net)")
     parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
@@ -973,7 +981,7 @@ def menu():
     segment_parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
 
     classify_parser = subparsers.add_parser("classify")
-    classify_parser.add_argument("-i","--input", required=False, help="Input folder containing AVI files")
+    classify_parser.add_argument("-i","--input", required=False, help="Input folder containing segmentatin folder of avi")
     classify_parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
     classify_parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     classify_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
@@ -1053,6 +1061,9 @@ def main():
 
 
     if args.command is None:
+        required = [args.input, args.output, args.environmental, args.segment_bin, args.weights]
+        if any(x is None for x in required):
+            parser.error(f"\t\t{RED} Error:{C_END} Full pipeline requires --inpu --output --enviromental --segment_bin --weights")
         #####################################################################
         # 0) Environmental merge                                            #
         #####################################################################
@@ -1062,7 +1073,7 @@ def main():
         if (not os.path.exists(env_merged_path)) or os.path.getsize(env_merged_path) == 0:
             if args.verbose:
                 print(f"\t\t\t   {WHITE}Info:{C_END} No merged environmental file found; building merged_environmental.csv ...")
-            env_out_file = run_merge_environmenta(args.environmental, output_dir=args.environmental, verbose=args.verbose)
+            env_out_file = run_merge_environmental(args.environmental, output_dir=args.environmental, verbose=args.verbose)
             #env_out_file = ""
         else:
             if args.verbose:
@@ -1152,4 +1163,8 @@ def main():
     print("", file=sys.stdout, flush=True)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\n{RED}Fatal Error:{C_END} {e}")
+        sys.exit(1)
