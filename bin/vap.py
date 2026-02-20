@@ -42,6 +42,7 @@ import glob
 import argparse
 import subprocess
 import shutil
+import itertools as _it
 import textwrap
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -49,8 +50,8 @@ from collections import defaultdict
 #####################################################################
 # Third-party libraries                                             #
 #####################################################################
-import torch
 from ultralytics import YOLO
+import torch
 
 #####################################################################
 # ANSI color codes                                                  #
@@ -67,56 +68,51 @@ C_END='\033[0m'
 
 
 #####################################################################
-# Function Definitions                                              #
-#####################################################################
-
-def directory(arg):
-    if os.path.isdir(arg):
-        return os.path.normpath(arg)
-    raise argparse.ArgumentTypeError("Not a valid directory path")
-
-def file_empty(path):
-    return (not os.path.exists(path)) or (os.path.exists(path) and os.stat(path).st_size == 0)
-
-def parse_iso_like(s):
-    """
-    Parse a timestamp with microseconds."""
-    s = s.strip().replace("T", " ")
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f",
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d %H:%M"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"Unparsable time: {s}")
-
-def supports_half(gpu: str = "0") -> bool:
-    """
-    Return True if the given CUDA device supports half-precision inference.
-    """
-    if not torch.cuda.is_available():
-        return False
-    try:
-        device_index = int(gpu)
-        major, minor = torch.cuda.get_device_capability(device_index)
-        # FP16 fully supported on compute capability >= 7.0
-        return major >= 7
-    except Exception:
-        return False
-
-#####################################################################
 # Environmental data merge                                          #
 #####################################################################
+
+iso_pattern = re.compile(r'\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?')
+
+def isoformat_parse(date_time: str) -> datetime:
+    """
+    Parse a timestamp string in several ISO-ish formats, with or without microseconds.
+    """
+    if date_time is None:
+        raise ValueError("Unparsable time: None")
+
+    date_time = date_time.strip()
+    if date_time.endswith("Z"):
+        date_time = date_time[:-1]
+
+    formats = [
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_time, fmt)
+        except ValueError:
+            continue  
+
+    try:
+        return datetime.fromisoformat(date_time)
+    except Exception:
+        raise ValueError(f"Unparsable time: {date_time!r}")
+
 
 def contains_header(ptr):
     """Detect CSV header by checking first token starts with 'Time'."""
     pos = ptr.tell()
     line = ptr.readline()
     ptr.seek(pos)
-    return line.startswith("Time")
+    return line.strip().lower().startswith("time")
 
-def get_files(dir_path):
+def combine_pub_csv(dir_path):
     files = [os.path.join(dir_path, f) for f in os.listdir(dir_path)]
     files = [f for f in files if os.path.isfile(f)]
     files.sort()
@@ -125,95 +121,156 @@ def get_files(dir_path):
         sys.exit(1)
     return files
 
-class DoubleGen:
-    """Yield (last_row_dict, next_row_dict) pairs across a CSV file (DictReader)."""
-    def __init__(self, f, fieldnames=None, delimiter=',', header_lines=0):
-        import itertools as _it
-        self.f = f
-        self.fptr = open(f, 'r', newline='')
-        self.header_lines = header_lines
-        if fieldnames:
-            self.reader = csv.DictReader(_it.islice(self.fptr, self.header_lines, None), fieldnames, delimiter=delimiter)
-        else:
-            self.reader = csv.DictReader(_it.islice(self.fptr, self.header_lines, None), delimiter=delimiter)
-        self.fieldnames = self.reader.fieldnames
-        self._last = None
-        self._next = None
-    def __iter__(self): return self
-    def __next__(self):
-        if self._last is None and self._next is None:
-            self._last = next(self.reader)
-            self._next = next(self.reader)
-        else:
-            self._last = self._next
-            self._next = next(self.reader)
-        return self._last, self._next
-    def restart(self):
-        self.fptr.seek(0)
-        # rebuild reader and skip header lines
-        if self.fieldnames:
-            self.reader = csv.DictReader(self.fptr, fieldnames=self.fieldnames)
-        else:
-            self.reader = csv.DictReader(self.fptr)
-        next(self.reader)  # skip header
-        self._last = next(self.reader)
-        self._next = next(self.reader)
+def _convert_nmea_lat(lat_raw):
+    if lat_raw is None:
+        return None
+    s = str(lat_raw).strip()
+    if not s:
+        return None
 
-def dir_double_gen(directory, fieldnames=None, delimiter=',', header_lines=1):
-    if not os.path.exists(directory):
-        print(f"\t\t{RED}  Error:{C_END} directory not valid for the generator: {directory}", file=sys.stderr)
-        sys.exit(1)
-    files = get_files(directory)
-    prev_next = None
-    for i, f in enumerate(files):
-        gen = DoubleGen(f, fieldnames, delimiter, header_lines)
-        try:
-            new_last, new_next = next(gen)
-        except StopIteration:
-            continue
-        if prev_next is not None:
-            yield prev_next, new_last
-        yield new_last, new_next
-        try:
-            for _last, _next in gen:
-                yield _last, _next
-        except StopIteration:
-            pass
-        prev_next = _next
+    try:
+        val = float(s)
+    except ValueError:
+        return None
 
-def get_time_env_like(line):
+    # If already a decimal degree in [-90, 90], just return it
+    if -90.0 <= val <= 90.0:
+        return val
+
+    # Assume NMEA ddmm.mmmm (e.g., 4533.12 → 45° + 33.12')
+    parts = s.split(".")
+    int_part = parts[0]
+    if len(int_part) < 4:
+        return None
+
+    deg = float(int_part[:-2])
+    minutes = float(int_part[-2:] + ("." + parts[1] if len(parts) > 1 else ""))
+    return deg + minutes / 60.0
+
+
+def _convert_nmea_lon(lon_raw):
+    if lon_raw is None:
+        return None
+    s = str(lon_raw).strip()
+    if not s:
+        return None
+
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+
+    # If already a decimal degree in [-180, 180], just return it
+    if -180.0 <= val <= 180.0:
+        return val
+
+    # Assume NMEA dddmm.mmmm (e.g., 12345.67 → 123° + 45.67')
+    parts = s.split(".")
+    int_part = parts[0]
+    if len(int_part) < 5:
+        return None
+
+    deg = float(int_part[:-2])
+    minutes = float(int_part[-2:] + ("." + parts[1] if len(parts) > 1 else ""))
+    return deg + minutes / 60.0
+
+
+def pairwise_csv_rows(directory, fieldnames=None, delimiter=',', header_lines=1):
+    """
+    Iterate through all CSVs in the directory and yield (last_row, next_row) pairs,
+    preserving boundaries between files.
+    """
+    files = combine_pub_csv(directory)
+    prev_last = None
+
+    for f in files:
+        with open(f, 'r', newline='') as fp:
+            # Skip header lines
+            for _ in range(header_lines):
+                next(fp, None)
+
+            reader = csv.DictReader(fp, fieldnames=fieldnames, delimiter=delimiter)
+
+            try:
+                last_row = next(reader)
+            except StopIteration:
+                continue
+
+            if prev_last is not None:
+                # Bridge last row of previous file with first row of this file
+                yield prev_last, last_row
+
+            for next_row in reader:
+                yield last_row, next_row
+                last_row = next_row
+
+            prev_last = last_row
+
+
+def format_timestamp(line):
     """Parse environmental 'Time' column (ISO-ish or epoch 1904 seconds)."""
     if "Time" not in line:
         raise KeyError("Expected 'Time' column in environmental data")
+
     val = (line["Time"] or "").strip()
-    # ISO-ish
-    if re.search(r'\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}\.\d{6}', val):
+    if not val:
+        raise KeyError("Expected 'Time' column in environmental data")
+
+    val = " ".join(val.split())
+
+    # 1. ISO-like timestamps    
+    if iso_pattern.search(val):
         try:
-            dt = parse_iso_like(val)
-            # If ends with Z (UTC), apply the  -7h shift
+            dt = isoformat_parse(val)
             if val.endswith("Z"):
                 dt = dt - timedelta(hours=7)
             return dt
         except Exception:
-            pass
-    # Numeric seconds 1904-01-01
-    else:
-        try:
-            seconds = float(val)
-            start = datetime(1904, 1, 1)
-            # -7h shift
-            delta = timedelta(hours=-7, seconds=seconds) 
-            return start + delta
-        except Exception:
-            # fallback
-            return parse_iso_like(val)
+            pass  # allow numeric parsing below
+
+    # 2. Numeric seconds (epoch 1904)
+    try:
+        seconds = float(val)
+        start = datetime(1904, 1, 1)
+        delta = timedelta(hours=-7, seconds=seconds)
+        return start + delta
+    except Exception:
+        pass  # allow final fallback
+
+    # 3. Final fallback ISO parse
+    return isoformat_parse(val)
 
 def closest_time(occ_time, last_pub_time, next_pub_time, max_time_gap=10):
-    next_gap = (next_pub_time - occ_time)
-    last_gap = (occ_time - last_pub_time)
-    if (last_gap > timedelta(seconds=max_time_gap) and next_gap > timedelta(seconds=max_time_gap)):
-        return "skip"
-    return "last" if last_gap <= next_gap else "next"
+    """
+    Choose the closest publisher timestamp to occ_time.
+    """
+    max_delta = timedelta(seconds=max_time_gap)
+
+    # Compute distances to publisher times (None means that side doesn't exist)
+    if last_pub_time is not None:
+        last_dist = abs(occ_time - last_pub_time)
+    else:
+        last_dist = None
+
+    if next_pub_time is not None:
+        next_dist = abs(next_pub_time - occ_time)
+    else:
+        next_dist = None
+
+    if last_dist is not None and next_dist is not None:
+        if last_dist > max_delta and next_dist > max_delta:
+            return "skip"
+
+    if last_dist is None:
+        return "next"
+
+    if next_dist is None:
+        return "last"
+
+    if last_dist <= next_dist:
+        return "last"
+    else:
+        return "next"
 
 def check_env_header(directory, expected_header, delimiter=","):
     env_files = [os.path.join(directory, f) for f in os.listdir(directory)
@@ -242,7 +299,7 @@ def check_env_header(directory, expected_header, delimiter=","):
             sys.exit(1)
 
 def publisher_iterator(d, header):
-    files = get_files(d)
+    files = combine_pub_csv(d)
     for f in files:
         with open(f, 'r', newline='') as ptr:
             if contains_header(ptr):
@@ -254,15 +311,27 @@ def publisher_iterator(d, header):
             for line in reader:
                 yield line
 
-def merge_environmental(environmental_dir, output_dir=None, header_lines=0, verbose=True):
+def ensure_parsed_time(row):
+    """Store parsed datetime in row['_parsed_time'] once."""
+    if "_parsed_time" not in row:
+        raw = row.get("Time")
+        try:
+            row["_parsed_time"] = format_timestamp(row)
+        except Exception as e:
+            print(f"\t\t\t{RED}  DEBUG:{C_END}Failed to parse Time value:", repr(raw))
+            print("Error:", e)
+            row["_parsed_time"] = None
+    return row
+
+def run_merge_environmental(environmental_dir, output_dir=None, verbose=True):
     """
     Merge environmental publishers by aligning other publishers to the Inclinometer timeline.
     Writes merged_environmental.csv in environmental_dir.
     """
     environmental_dir = os.path.abspath(environmental_dir)
-    out_file = os.path.join(environmental_dir, "merged_environmental.csv")
+    env_out_file = os.path.join(environmental_dir, "merged_environmental.csv")
     if output_dir:
-        out_file = os.path.join(output_dir, "merged_environmental.csv")
+        env_out_file = os.path.join(output_dir, "merged_environmental.csv")
 
     # Publisher expected headers
     ctd_header = ["Time","Temperature","Conductivity","Pressure","Depth","Salinity","Sound Velocity"]
@@ -298,7 +367,7 @@ def merge_environmental(environmental_dir, output_dir=None, header_lines=0, verb
                 d = d2
         check_env_header(d, header)
     if verbose:
-        print(f"\t\t{WHITE}   Info:{C_END} Environmental headers verified. Merging publishers")
+        print("[0/4] Environmental headers verified. Merging publishers")
 
     # Build output fieldnames: Time + all non-Time non-Checksum from others + Latitude/Longitude last
     merged_fields = ["Time"] + [
@@ -306,107 +375,136 @@ def merge_environmental(environmental_dir, output_dir=None, header_lines=0, verb
         if (publisher != "GPS Publisher" and "Checksum" not in col and col != "Time")
     ] + ["Latitude", "Longitude"]
 
-    with open(out_file, 'w', newline='') as out_ptr:
+    with open(env_out_file, 'w', newline='') as out_ptr:
         env_writer = csv.DictWriter(out_ptr, merged_fields, extrasaction='ignore')
         env_writer.writeheader()
 
         # Inclinometer provides the timeline
         inc_iter = publisher_iterator(os.path.join(environmental_dir, base_publisher[0]), base_publisher[1])
+        try:
+            first_inc_row = next(inc_iter)
+        except StopIteration:
+            print("Error: No inclinometer data found.", file=sys.stderr)
+            return env_out_file
 
-        # Initialize other publisher iterators as double_gens
+        ensure_parsed_time(first_inc_row)
+        first_inc_time = first_inc_row["_parsed_time"]
+        
+        # Initialize other publisher iterators
         pub_readers = []
         for pub_dir, pub_header in other_publishers:
             d = os.path.join(environmental_dir, pub_dir)
             if not os.path.isdir(d):
                 d2 = os.path.join(environmental_dir, pub_dir.rstrip('/'))
                 d = d2 if os.path.isdir(d2) else d
-            pub_readers.append(dir_double_gen(d, pub_header))
+            pub_readers.append(pairwise_csv_rows(d, pub_header))
 
         last_rows = []
         next_rows = []
+
         for j, dg in enumerate(pub_readers):
             try:
                 l, n = next(dg)
+                ensure_parsed_time(l)
+                ensure_parsed_time(n)
             except StopIteration:
-                print(f"\t\t{RED}  Error:{C_END} {other_publishers[j][0]} empty.", file=sys.stderr)
-                return out_file
-            last_rows.append(l); next_rows.append(n)
+                print(f"StopIteration Error: {other_publishers[j][0]} empty.", file=sys.stderr)
+                return env_out_file
 
-        for line_num, inc_row in enumerate(inc_iter, start=1):
-            try:
-                inc_time = get_time_env_like(inc_row)
-            except Exception:
-                continue
+            # Align publisher to the inclinometer timeline
+            while True:
+                n_time = n.get("_parsed_time")
+                if n_time is None:
+                    try:
+                        l, n = next(dg)
+                        ensure_parsed_time(l)
+                        ensure_parsed_time(n)
+                        continue
+                    except StopIteration:
+                        break
 
-            merged_row = dict(inc_row)  # start with inclinometer row
+                if n_time >= first_inc_time:
+                    break
+
+                try:
+                    l, n = next(dg)
+                    ensure_parsed_time(l)
+                    ensure_parsed_time(n)
+                except StopIteration:
+                    break
+
+            last_rows.append(l)
+            next_rows.append(n)
+
+
+        for line_num, inc_row in enumerate(_it.chain([first_inc_row], inc_iter), start=1):
+            ensure_parsed_time(inc_row)
+            inc_time = inc_row["_parsed_time"]
+
+            merged_row = dict(inc_row) 
 
             for i, dg in enumerate(pub_readers):
-                try:
-                    last_time = get_time_env_like(last_rows[i])
-                    next_time = get_time_env_like(next_rows[i])
-                except Exception:
-                    continue
+                ensure_parsed_time(last_rows[i])
+                ensure_parsed_time(next_rows[i])
 
-                while inc_time > next_time:
+                last_time = last_rows[i]["_parsed_time"]
+                next_time = next_rows[i]["_parsed_time"]
+
+                while True:
+                    ensure_parsed_time(next_rows[i])
+                    next_time = next_rows[i]["_parsed_time"]
+
+                    if next_time is None or inc_time <= next_time:
+                        break
+
                     try:
                         last_rows[i], next_rows[i] = next(dg)
-                        next_time = get_time_env_like(next_rows[i])
+                        ensure_parsed_time(last_rows[i])
+                        ensure_parsed_time(next_rows[i])
                     except StopIteration:
-                        # no more rows for this publisher
                         break
 
                 # pick closer
-                try:
-                    last_time = get_time_env_like(last_rows[i])
-                    which = closest_time(inc_time, last_time, next_time, max_time_gap=10)
-                    if which == "last":
-                        pub_row = last_rows[i]
-                    elif which == "next":
-                        pub_row = next_rows[i]
-                    else:  # skip
-                        continue
-                    merged_row.update(pub_row)
-                    merged_row["Time"] = inc_time
-                except Exception:
+                last_time = last_rows[i]["_parsed_time"]
+                which = closest_time(inc_time, last_time, next_time, max_time_gap=10)
+                if which == "last":
+                    pub_row = last_rows[i]
+                elif which == "next":
+                    pub_row = next_rows[i]
+                else: 
                     continue
+                merged_row.update(pub_row)
+                merged_row["Time"] = inc_time
 
             # Normalize Lat/Lon if present
-            try:
-                if "Longitude" in merged_row and "Latitude" in merged_row:
-                    lon = str(merged_row["Longitude"]).strip()
-                    lat = str(merged_row["Latitude"]).strip()
-                    # If numeric string > 180 in abs, treat as deg+min (DDDMM.m)
-                    def dm_to_deg(num, deg_len):
-                        s = str(num)
-                        deg = float(s[:deg_len])
-                        minutes = float(s[deg_len:])
-                        return deg + minutes/60.0
-                    try:
-                        lonf = float(lon)
-                        latf = float(lat)
-                        if abs(lonf) >= 180:
-                            lonf = dm_to_deg(lon, 3)
-                        if abs(latf) >= 90:
-                            latf = dm_to_deg(lat, 2)
-                        merged_row["Longitude"] = lonf
-                        merged_row["Latitude"] = latf
-                    except Exception:
-                        pass
-                    # Apply hemispheres if present
-                    if merged_row.get("Latitude Hemisphere", "N") == "S":
-                        try: merged_row["Latitude"] = -abs(float(merged_row["Latitude"]))
-                        except Exception: pass
-                    if merged_row.get("Longitude Hemisphere", "E") == "W":
-                        try: merged_row["Longitude"] = -abs(float(merged_row["Longitude"]))
-                        except Exception: pass
-            except KeyError:
-                pass
+            if "Longitude" in merged_row and "Latitude" in merged_row:
+                lat_raw = merged_row.get("Latitude")
+                lon_raw = merged_row.get("Longitude")
+
+                # Hemisphere fields exist in the GGA-style GPS header
+                lat_hemi = merged_row.get("Latitude Hemisphere")
+                lon_hemi = merged_row.get("Longitude Hemisphere")
+
+                # 1) Convert numeric / NMEA ddmm.mmmm to decimal degrees
+                lat = _convert_nmea_lat(lat_raw)
+                lon = _convert_nmea_lon(lon_raw)
+
+                # 2) Apply hemisphere sign if hemisphere columns exist
+                if lat is not None:
+                    if lat_hemi == "S":
+                        lat = -abs(lat)
+                    merged_row["Latitude"] = lat
+
+                if lon is not None:
+                    if lon_hemi == "W":
+                        lon = -abs(lon)
+                    merged_row["Longitude"] = lon
 
             env_writer.writerow(merged_row)
 
     if verbose:
-        print(f"\t\t{WHITE}   Info:{C_END} Created Environmental Merge File: {out_file}")
-    return out_file
+        print(f"\t\t{WHITE}   Info:{C_END} Created environmental merge: {env_out_file}")
+    return env_out_file
 
 #####################################################################
 # Segmentation                                                      #
@@ -418,13 +516,17 @@ def run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args=None, verbo
     os.makedirs(seg_root, exist_ok=True)
     os.makedirs(measure_root, exist_ok=True)
 
-    avis = glob.glob(os.path.join(input_dir, "*.avi"))
+    video_exts = ("avi", "AVI", "mp4", "MP4", "mpg", "MPG", "mpeg", "MPEG")
+    avis = []
+    for ext in video_exts:
+        avis.extend(glob.glob(os.path.join(input_dir, f"*.{ext}")))
+
 
     if not avis:
         raise FileNotFoundError(f"\t\t\t{RED}  Error:{C_END} No .avi files found in {input_dir}")
 
     if verbose:
-        print(f"\t\t\t{WHITE}   Info:{C_END} Segmenting {len(avis)} avi videos files")
+        print(f"\t\t{WHITE}   Info:{C_END} Segmenting {len(avis)} avi videos files")
 
     for avi in avis:
         avi_base = os.path.splitext(os.path.basename(avi))[0]
@@ -436,22 +538,40 @@ def run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args=None, verbo
             cmd.extend(seg_kv_args)
 
         if verbose:
-            #print(f"\t\t\t{PURP}Running:{C_END}", " ".join(map(str, cmd)))
             print(f"\t\t\t{PURP}Running:{C_END} ", avi)
 
-        subprocess.run(cmd, check=True)
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Segmentation failed for {avi}: {e}")
+            continue
+
         # also copy  measurement csv per avi into measurements root
         try:
             out_measure = os.path.join(avi_out, avi_base, "measurements", f"{avi_base}.csv")
             shutil.copy2(out_measure, os.path.join(measure_root, f"{avi_base}_measure.csv"))
         except Exception as e:
-            print(f"\t\t\t{RED}  Error:{C_END} Could Not Copy {out_measure}: {e}")
+            print(f"\t\t{RED}  Error:{C_END} could not copy {out_measure}: {e}")
 
     return seg_root, len(avis)
 
 #####################################################################
 # Classification                                                    #
 #####################################################################
+
+def supports_half(gpu: str = "0") -> bool:
+    """
+    Return True if the given CUDA device supports half-precision inference.
+    """
+    if not torch.cuda.is_available():
+        return False
+    try:
+        device_index = int(gpu)
+        major, minor = torch.cuda.get_device_capability(device_index)
+        # FP16 fully supported on compute capability >= 7.0
+        return major >= 7
+    except Exception:
+        return False
 
 def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
     patterns = ["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
@@ -463,36 +583,38 @@ def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
             print(f"\t\t\t{RED}  Error:{C_END} No image files found in directory: {corrected_crop_dir}")
         )
 
-    if verbose:
+    if verbose:	
         print(f"\t\t\t{PURP}Running:{C_END} ", corrected_crop_dir)
 
     # prediction over a folder
     use_half = supports_half(gpu)
-    results = model(
-        corrected_crop_dir,
-        verbose=False,
-        stream=True,
-        batch=32,
-        device=f"cuda:{gpu}",
-        imgsz=640,
-        half=use_half,
-    )
     class_names = list(model.names.values())
     wrote_header = False
     n = 0
-    with open(out_csv, "w", newline='') as f:
-        writer = csv.writer(f)
-        for res in results:
-            n += 1
-            fname = os.path.basename(res.path)
-            probs = res.probs
-            prob_list = [float(x) for x in probs.data.tolist()]
-            if not wrote_header:
-                writer.writerow(["image"] + class_names)
-                wrote_header = True
-            writer.writerow([fname] + prob_list)
-            if verbose and n % 10000 == 0:
-                print(f"\t\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
+
+    with torch.inference_mode():
+        results = model.predict(
+            corrected_crop_dir,
+            imgsz=640,
+            batch=32,
+            stream=True,
+            half=use_half,
+            device=gpu,
+            verbose=False
+        )
+        with open(out_csv, "w", newline='') as f:
+            writer = csv.writer(f)
+            for res in results:
+                n += 1
+                fname = os.path.basename(res.path)
+                probs = res.probs
+                prob_list = [float(x) for x in probs.data.tolist()]
+                if not wrote_header:
+                    writer.writerow(["image"] + class_names)
+                    wrote_header = True
+                writer.writerow([fname] + prob_list)
+                if verbose and n % 10000 == 0:
+                    print(f"\t\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
     return n
 
 def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
@@ -521,7 +643,7 @@ def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
             try:
                 shutil.copy2(out_csv, os.path.join(class_root, os.path.basename(out_csv)))
             except Exception as e:
-                print(f"\t\t\t{RED}  Error:{C_END} Could Not Copy {out_csv}: {e}")
+                print(f"\t\t{RED}  Error:{C_END} could not copy {out_csv}: {e}")
     return class_root, total_imgs
 
 #####################################
@@ -539,41 +661,46 @@ def dec_to_micro(decimal_second):
     else:
         raise ValueError("Unhandled decimal second")
 
-def new_date_code_parse(avi):
+def avi_date_parse(avi):
+    """
+    Parse both new and old camera timestamp formats from .avi names.
+    New: MM-DD-YYYY-HH-MM-SS.dec
+    Old: YYYYDDMMHHMMSS.dec
+    """
+
+    # New camera format
     m = re.search(r"(\d{2})-(\d{2})-(\d{2,4})-(\d{2})-(\d{2})-(\d{2})\.(\d{1,3})", avi)
-    if not m: 
-        raise ValueError(f"Bad avi: {avi}")
+    if m:
+        month, day, year, h, m_, s, dec_s = m.groups()
+        if len(year) == 2:
+            year = "20" + year
+        return datetime(
+            int(year), int(month), int(day),
+            int(h), int(m_), int(s),
+            int(dec_to_micro(dec_s))
+        )
 
-    month, day, year, h, m_, s, dec_s = m.groups()
-
-    if len(year) == 2: 
-        year = f"20{year}"
-    microseconds = dec_to_micro(dec_s)
-    return datetime(int(year), int(month), int(day), int(h), int(m_), int(s), int(microseconds))
-
-def old_date_code_parse(avi):
+    # Old camera format
     m = re.search(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{1,3})", avi)
-    if not m: 
-        raise ValueError(f"Bad avi: {avi}")
+    if m:
+        y, day, month, h, m_, s, dec_s = m.groups()
+        return datetime(
+            int(y), int(month), int(day),
+            int(h), int(m_), int(s),
+            int(dec_to_micro(dec_s))
+        )
 
-    y, day, month, h, m_, s, dec_s = m.groups()
-    microseconds = dec_to_micro(dec_s)
-    return datetime(int(y), int(month), int(day), int(h), int(m_), int(s), int(microseconds))
-
-def date_code_parse(avi):
-    if "Cam" in avi or "Camera" in avi:
-        return new_date_code_parse(avi)
-    else:
-        return old_date_code_parse(avi)
+    raise ValueError(f"Unrecognized timestamp format: {avi}")
 
 def create_measure_dict(avi, measure_dir):
     """convert measure.csv to a dictionary    """
     csv_path = os.path.join(measure_dir, avi + "_measure.csv")
-    md = defaultdict(lambda: "error")
+    md = {}
     fps = 19.88 if ("Cam" in avi or "Camera" in avi) else 18.0
     sec_p_frame = 1.0 / fps
     if not os.path.exists(csv_path): 
-        sys.exit(f"ERROR: Missing measurement CSV: {csv_path}")
+        print(f"\t\t{RED}  Error:{C_END} Missing measurement CSV: {csv_path}")
+        sys.exit(1)
 
     with open(csv_path, "r", encoding="utf-8", newline='') as mf:
         mlines = csv.reader(mf)
@@ -581,8 +708,9 @@ def create_measure_dict(avi, measure_dir):
             #image,area,major,minor,perimeter,x,y,mean,height
             header = next(mlines)
         except StopIteration:
-            return md, header
-        video_start_date = date_code_parse(avi)
+            return md,  []
+
+        video_start_date = avi_date_parse(avi)
         for row in mlines:
             if not row or row[0] == "End of Measurement": 
                 break
@@ -597,26 +725,24 @@ def create_measure_dict(avi, measure_dir):
             md[os.path.basename(image)] = [frame_date.isoformat()] + row
     return md, header
 
-def build_occurrence(output_dir, verbose=False):
+def run_build_occurrence(output_dir, verbose=False):
     measure_root = os.path.join(output_dir, "measurements")
     classi_root = os.path.join(output_dir, "classification")
     merge_root = os.path.join(output_dir, "merge")
     os.makedirs(merge_root, exist_ok=True)
 
     if os.path.exists(classi_root) and  os.path.exists(measure_root):
-        classi_count = len(glob.glob(f"{classi_root}/*_classification.csv"))
-        measure_count = len(glob.glob(f"{measure_root}/*_measure.csv"))
         avis_ex = sorted(
             [os.path.basename(f) for f in glob.glob(f"{classi_root}/*_classification.csv")],
-            key=lambda f: date_code_parse(f)
+            key=lambda f: avi_date_parse(f)
         )
         avis_order = [ f.replace("_classification.csv", "") for f in avis_ex ]
 
     base_outdir = os.path.basename(output_dir)
-    combined = os.path.join(output_dir, "merge", f"{base_outdir}_merged_occurrence.csv")
+    all_occurrences = os.path.join(output_dir, "merge", f"{base_outdir}_merged_occurrence.csv")
     header_written = False
     #header = "time,area,major,minor,perimeter,x,y,mean,height,predicted_taxon,probability"
-    with open(combined, "w", newline='') as out:
+    with open(all_occurrences, "w", newline='') as out:
         writer = csv.writer(out)
         for avi in avis_order:
             class_csv = os.path.join(classi_root, f"{avi}_classification.csv")
@@ -624,12 +750,13 @@ def build_occurrence(output_dir, verbose=False):
             if not os.path.exists(class_csv) or not os.path.exists(measure_file):
                 if verbose: 
                     print(f"\t\t\t{YELGRN}Warning:{C_END} Measurement File Missing For {avi}: {measure_file}")
-                return None
+                continue
 
             mdict, mheader = create_measure_dict(avi, measure_root)
             with open(class_csv, "r", newline='') as cf:
                 cf_lines = csv.reader(cf)
                 cf_header = next(cf_lines)  
+                class_names = cf_header[1:]
 
                 if not header_written:
                     #time,image,area,major,minor,perimeter,x,y,mean,height,predicted_taxon,probability
@@ -640,7 +767,6 @@ def build_occurrence(output_dir, verbose=False):
                     if not row: 
                         continue
                     image_name = os.path.basename(row[0])
-                    class_names = cf_header[1:]
                     probs = row[1:]
                     try:
                         prob_floats = [float(p) if p != "" else 0.0 for p in probs]
@@ -651,22 +777,42 @@ def build_occurrence(output_dir, verbose=False):
                     max_idx = max(range(len(prob_floats)), key=lambda i: prob_floats[i])
                     predicted_taxon = class_names[max_idx]
                     probability = prob_floats[max_idx]
-                    measure_data = mdict[image_name]
-                    measure_data[1] = os.path.basename(measure_data[1])
-                    if measure_data == "error":
+                    measure_data = mdict.get(image_name)
+                    if measure_data is None:
                         if verbose: 
                             print(f"\t\t\t{RED}  Error:{C_END} Missing Measurement For {image_name}")
                         continue
-
-                    writer.writerow(measure_data + [predicted_taxon, f"{probability:.6f}"])
+                    m2 = measure_data.copy()
+                    m2[1] = os.path.basename(m2[1])
+                    writer.writerow(m2 + [predicted_taxon, f"{probability:.6f}"])
     
-    return combined
+    return all_occurrences
 
 #############################################
 # Final merge (occurrence + environmental)  #
 #############################################
 
-def create_final(input_dir, output_dir, occurrence_file, environmental_file, max_time_gap=2, verbose=True):
+def pairwise_csv_file(filepath, fieldnames=None, delimiter=',', header_lines=0):
+    """
+    Yield (last_row, next_row) pairs from a single CSV file.
+    """
+    with open(filepath, 'r', newline='') as fp:
+        # skip header lines
+        for _ in range(header_lines):
+            next(fp, None)
+
+        reader = csv.DictReader(fp, fieldnames=fieldnames, delimiter=delimiter)
+
+        try:
+            last_row = next(reader)
+        except StopIteration:
+            return  # empty file
+
+        for next_row in reader:
+            yield last_row, next_row
+            last_row = next_row
+
+def run_create_final(input_dir, output_dir, occurrence_file, environmental_file, max_time_gap=2, verbose=True):
     input_name = os.path.basename(os.path.normpath(input_dir))
     parts = input_dir.strip("/").split("/")
     cruises_set = {"MEZCAL", "MBON", "CONCORDE", "OSTRICH", "SPECTRA"}
@@ -686,12 +832,18 @@ def create_final(input_dir, output_dir, occurrence_file, environmental_file, max
         prefix = input_name
     final_output = os.path.join(output_dir, "merge", f"{prefix}_{cruise_name}_merge_final.csv")
 
-    # lightweight two-row window over env file
-    class _DG(DoubleGen): pass
-    env_ptr = _DG(environmental_file, header_lines=0)
+    # read environmental header
+    with open(environmental_file, 'r') as tmp_fp:
+        for row in csv.reader(tmp_fp):
+            if row:    
+                env_header = row
+                break
+
+    # slide window over env file
+    env_ptr = pairwise_csv_file(environmental_file)
+
     with open(occurrence_file, 'r', newline='') as occ_ptr, open(final_output, 'w', newline='') as final_ptr:
         occ_csv_ptr = csv.DictReader(occ_ptr)
-        env_header = env_ptr.fieldnames
         occ_header = occ_csv_ptr.fieldnames
         env_header_no_time = [h for h in env_header if h != 'Time']
         final_header = ["Cruise_name", "HD_ID", "Path"] + occ_header + env_header_no_time
@@ -699,31 +851,70 @@ def create_final(input_dir, output_dir, occurrence_file, environmental_file, max
         final_writer.writeheader()
 
         last_env_row, next_env_row = next(env_ptr)
-        next_env_time = get_time_env_like(next_env_row)
+        ensure_parsed_time(last_env_row)
+        ensure_parsed_time(next_env_row)
+
+        next_env_time = next_env_row["_parsed_time"]
+        last_env_time = last_env_row["_parsed_time"] 
         last_occ_row = None
 
         for line_num, occ_row in enumerate(occ_csv_ptr, start=1):
-            occ_time = parse_iso_like(occ_row["time"])
+            occ_time = isoformat_parse(occ_row["time"])
 
             if last_occ_row is not None:
-                last_occ_time = parse_iso_like(last_occ_row["time"])
+                last_occ_time = isoformat_parse(last_occ_row["time"])
                 if last_occ_time > occ_time:
                     if verbose: 
                         print(f"\t\t\t{YELGRN}Warning:{C_END} Occurrence time decreased at line {line_num}")
-                    env_ptr.restart()
+                    env_ptr = pairwise_csv_file(environmental_file)
                     last_env_row, next_env_row = next(env_ptr)
-                    next_env_time = get_time_env_like(next_env_row)
+                    ensure_parsed_time(last_env_row)
+                    ensure_parsed_time(next_env_row)
+                    next_env_time = next_env_row["_parsed_time"]
 
-            while occ_time > next_env_time:
+
+            while True:
+                try:
+                    ensure_parsed_time(next_env_row)
+                    next_env_time = next_env_row["_parsed_time"]
+                except Exception:
+                    # next_env_row has no valid time → stop advancing
+                    ensure_parsed_time(last_env_row)
+                    last_env_time = last_env_row["_parsed_time"]
+                    next_env_time = last_env_time
+                    break
+
+                # If environmental timestamp has caught up
+                if next_env_time is None:
+                    print(f"\t\t\t{RED}  Error:{C_END} DEBUG: next_env_row has bad timestamp:")
+                    print("line:", next_env_row)
+                    print("raw Time:", repr(next_env_row.get("Time")))
+                    print(f"\t\t\t{RED}  Error:{C_END} Stopping debug because next_env_time is None")
+                    sys.exit(1)
+
+                if last_env_time is None:
+                    print(f"\t\t\t{RED}  Error:{C_END} DEBUG: last_env_row has bad timestamp:")
+                    print("line:", last_env_row)
+                    print("raw Time:", repr(last_env_row.get("Time")))
+                    print (f"\t\t\t{RED} Error:{C_END} Stopping debug because last_env_time is None")
+                    sys.exit(1)
+
+                if occ_time <= next_env_time:
+                    break
+
+                # Otherwise keep advancing the environmental pointer
                 try:
                     last_env_row, next_env_row = next(env_ptr)
+                    ensure_parsed_time(last_env_row)
+                    ensure_parsed_time(next_env_row)
                 except StopIteration:
-                    if verbose: 
-                        print("\t\t\t{YELGRN}Warning:{C_END} Environmental data exhausted")
+                    if verbose:
+                        print("Warning: environmental data exhausted")
                     break
-                next_env_time = get_time_env_like(next_env_row)
 
-            last_env_time = get_time_env_like(last_env_row)
+            ensure_parsed_time(last_env_row)
+            last_env_time = last_env_row["_parsed_time"]
+
             which = closest_time(occ_time, last_env_time, next_env_time, max_time_gap)
             if which == "skip":
                 continue
@@ -734,11 +925,11 @@ def create_final(input_dir, output_dir, occurrence_file, environmental_file, max
             final_row["Cruise_name"] = cruise_name
             final_row["HD_ID"] = input_name
             final_row["Path"] = input_dir
-            if "time" in final_row:
-                if isinstance(final_row["time"], datetime):
-                    final_row["time"] = final_row["time"].strftime("%Y-%m-%d %H:%M:%S.%f")
-                else:
-                    final_row["time"] = final_row["time"].replace("T", " ")
+            if "time" in final_row and isinstance(final_row["time"], datetime):
+                # produce ISO-8601
+                final_row["time"] = final_row["time"].isoformat()
+            
+            final_row.pop("_parsed_time", None)
             final_writer.writerow(final_row)
             last_occ_row = occ_row
 
@@ -760,12 +951,12 @@ class CustomArgumentParser(argparse.ArgumentParser):
 
 def menu():
     parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
-    parser.add_argument("-i","--input", type=directory, required=False, help="Input folder containing AVI files")
+    parser.add_argument("-i","--input", required=False, help="Input folder containing AVI files")
     parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
     parser.add_argument("-ai","--ai-model", required=False, help="AI model (yolo,inceptionv3,megadetector,U-Net)")
     parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
     parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
-    parser.add_argument("-en","--environmental", type=directory, required=False, help="Path to environmental data directory (publisher subdirs inside)")
+    parser.add_argument("-en","--environmental", required=False, help="Path to environmental data directory (publisher subdirs inside)")
     parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
     parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
@@ -775,14 +966,14 @@ def menu():
     #####################################################################
     subparsers = parser.add_subparsers(dest="command")
     segment_parser = subparsers.add_parser("segment")
-    segment_parser.add_argument("-i","--input", type=directory, required=False, help="Input folder containing AVI files")
+    segment_parser.add_argument("-i","--input", required=False, help="Input folder containing AVI files")
     segment_parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
     segment_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     segment_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
     segment_parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
 
     classify_parser = subparsers.add_parser("classify")
-    classify_parser.add_argument("-i","--input", type=directory, required=False, help="Input folder containing AVI files")
+    classify_parser.add_argument("-i","--input", required=False, help="Input folder containing AVI files")
     classify_parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
     classify_parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     classify_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
@@ -815,7 +1006,6 @@ def menu():
 # Main                                                              #
 #####################################################################
 def main():
-
     #####################################################################
     #                                                                   #
     #                         Start of Program                          #
@@ -869,18 +1059,16 @@ def main():
         if args.verbose:
             print(f"\t\t{WHITE}[0/4]{C_END} Environmental data merge")
         env_merged_path = os.path.join(args.environmental, "merged_environmental.csv")
-        if file_empty(env_merged_path):
+        if (not os.path.exists(env_merged_path)) or os.path.getsize(env_merged_path) == 0:
             if args.verbose:
                 print(f"\t\t\t   {WHITE}Info:{C_END} No merged environmental file found; building merged_environmental.csv ...")
-            env_out_file = merge_environmental(args.environmental, output_dir=args.environmental, header_lines=0, verbose=args.verbose)
+            env_out_file = run_merge_environmenta(args.environmental, output_dir=args.environmental, verbose=args.verbose)
             #env_out_file = ""
         else:
             if args.verbose:
                 print(f"\t\t\t   {WHITE}Info:{C_END} Found existing merged_environmental.csv — skipping environmental merge.")
             environmental_dir = os.path.abspath(args.environmental)
             env_out_file = os.path.join(environmental_dir, "merged_environmental.csv")
-
-
 
         #####################################################################
         # 1) Segmentation                                                   #
@@ -889,17 +1077,12 @@ def main():
             print(f"\t\t{WHITE}[1/4]{C_END} Segmentation")
         seg_root, n_avi = run_segmentation(args.segment_bin, args.input, args.output, seg_kv_args, args.verbose)
 
-
-
-
         #####################################################################
         # 2) Classification                                                 #
         #####################################################################
         if args.verbose:
             print(f"\t\t{WHITE}[2/4]{C_END} Classification")
         class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
-
-
 
         #####################################################################
         # 3) occurrence creation                                            #
@@ -914,13 +1097,11 @@ def main():
 
         if os.path.exists(classi_root) and os.path.exists(measure_root):
             print(f"\t\t\t   {WHITE}Info:{C_END} The measure_root or classi_root does exist")
-            combined_occ = build_occurrence(output_dir, verbose=args.verbose)
+            combined_occ = run_build_occurrence(output_dir, verbose=args.verbose)
         else:
             print(f"\t\t\t{RED}  Error:{C_END} The measure_root or classi_root does not exist")
             combined_occ = None
             #combined_occ = ""
-
-
 
         #####################################################################
         # 4) Final merge with environmental                                 #
@@ -930,7 +1111,7 @@ def main():
 
         if os.path.exists(combined_occ) and os.path.exists(env_out_file):
             print(f"\t\t\t   {WHITE}Info:{C_END} There are occurrence files or environment files ")
-            final_csv = create_final(args.input, args.output, combined_occ, env_out_file, max_time_gap=2, verbose=args.verbose)
+            final_csv = run_create_final(args.input, args.output, combined_occ, env_out_file, max_time_gap=2, verbose=args.verbose)
         else:
             print(f"\t\t\t{RED}  Error:{C_END} There are missing occurrence files or environment files ")
             final_csv = None
@@ -945,8 +1126,7 @@ def main():
             print(f"\t\t{WHITE}[2/4]{C_END} Classification")
         seg_root = args.input
         class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
-
-
+    
     #####################################################################
     # End of the run                                                    #
     #####################################################################
@@ -955,11 +1135,11 @@ def main():
     print(f"\t{GREEN}Pipeline complete!{C_END}")
     
     if args.command is None:
-        print(f"\t\t{WHITE}Environmental Merge:{C_END} {env_out_file}")
-        print(f"\t\t{WHITE}Segmented files:{C_END} {n_avi}")
-        print(f"\t\t{WHITE}Classified Images:{C_END} {n_imgs}")
-        print(f"\t\t{WHITE}Combined occurrence:{C_END} {combined_occ}")
-        print(f"\t\t{WHITE}Final merged file:{C_END} {final_csv}")
+        print(f"\t    {WHITE}Environmental Merge:{C_END} {env_out_file}")
+        print(f"\t        {WHITE}Segmented files:{C_END} {n_avi}")
+        print(f"\t      {WHITE}Classified Images:{C_END} {n_imgs}")
+        print(f"\t    {WHITE}Combined occurrence:{C_END} {combined_occ}")
+        print(f"\t      {WHITE}Final merged file:{C_END} {final_csv}")
 
     elif args.command == "segment":
         print(f"\t\t{WHITE}Segmented files:{C_END} {n_avi}")
