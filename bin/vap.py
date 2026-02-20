@@ -760,15 +760,34 @@ class CustomArgumentParser(argparse.ArgumentParser):
 
 def menu():
     parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
-    parser.add_argument("-i","--input", type=directory, required=True, help="Input folder containing AVI files")
-    parser.add_argument("-sb","--segment-bin", required=True, help="Path to segmentation binary")
-    parser.add_argument("-ai","--ai-model", required=True, help="AI model (yolo,inceptionv3,megadetector,U-Net)")
-    parser.add_argument("-mw","--weights", required=True, help="Model weights file (.weights,.pt)")
+    parser.add_argument("-i","--input", type=directory, required=False, help="Input folder containing AVI files")
+    parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
+    parser.add_argument("-ai","--ai-model", required=False, help="AI model (yolo,inceptionv3,megadetector,U-Net)")
+    parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
     parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
-    parser.add_argument("-en","--environmental", type=directory, required=True, help="Path to environmental data directory (publisher subdirs inside)")
-    parser.add_argument("-o","--output", required=True, help="Output directory (will contain segmentation/, classification/, merge/)")
+    parser.add_argument("-en","--environmental", type=directory, required=False, help="Path to environmental data directory (publisher subdirs inside)")
+    parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
     parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+
+    #####################################################################
+    # use subcommands                                           #
+    #####################################################################
+    subparsers = parser.add_subparsers(dest="command")
+    segment_parser = subparsers.add_parser("segment")
+    segment_parser.add_argument("-i","--input", type=directory, required=False, help="Input folder containing AVI files")
+    segment_parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
+    segment_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
+    segment_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
+    segment_parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+
+    classify_parser = subparsers.add_parser("classify")
+    classify_parser.add_argument("-i","--input", type=directory, required=False, help="Input folder containing AVI files")
+    classify_parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
+    classify_parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
+    classify_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
+    classify_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
+    classify_parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
 
     #####################################################################
     # Segmentation parameters                                           #
@@ -841,96 +860,116 @@ def main():
         print("", file=sys.stdout, flush=True)
 
     print(f"\t{GREEN}Starting pipeline at {t0:%Y-%m-%d %H:%M:%S}{C_END}", file=sys.stdout, flush=True)
-    #####################################################################
-    # 0) Environmental merge                                            #
-    #####################################################################
-    if args.verbose:
-        print(f"\t\t{WHITE}[0/4]{C_END} Environmental data merge")
-    env_merged_path = os.path.join(args.environmental, "merged_environmental.csv")
-    if file_empty(env_merged_path):
+
+
+    if args.command is None:
+        #####################################################################
+        # 0) Environmental merge                                            #
+        #####################################################################
         if args.verbose:
-            print(f"\t\t\t   {WHITE}Info:{C_END} No merged environmental file found; building merged_environmental.csv ...")
-        env_out_file = merge_environmental(args.environmental, output_dir=args.environmental, header_lines=0, verbose=args.verbose)
-        #env_out_file = ""
-    else:
+            print(f"\t\t{WHITE}[0/4]{C_END} Environmental data merge")
+        env_merged_path = os.path.join(args.environmental, "merged_environmental.csv")
+        if file_empty(env_merged_path):
+            if args.verbose:
+                print(f"\t\t\t   {WHITE}Info:{C_END} No merged environmental file found; building merged_environmental.csv ...")
+            env_out_file = merge_environmental(args.environmental, output_dir=args.environmental, header_lines=0, verbose=args.verbose)
+            #env_out_file = ""
+        else:
+            if args.verbose:
+                print(f"\t\t\t   {WHITE}Info:{C_END} Found existing merged_environmental.csv — skipping environmental merge.")
+            environmental_dir = os.path.abspath(args.environmental)
+            env_out_file = os.path.join(environmental_dir, "merged_environmental.csv")
+
+
+
+        #####################################################################
+        # 1) Segmentation                                                   #
+        #####################################################################
         if args.verbose:
-            print(f"\t\t\t   {WHITE}Info:{C_END} Found existing merged_environmental.csv — skipping environmental merge.")
-        environmental_dir = os.path.abspath(args.environmental)
-        env_out_file = os.path.join(environmental_dir, "merged_environmental.csv")
-
-
-
-    #####################################################################
-    # 1) Segmentation                                                   #
-    #####################################################################
-    if args.verbose:
-        print(f"\t\t{WHITE}[1/4]{C_END} Segmentation")
-    seg_root, n_avi = run_segmentation(args.segment_bin, args.input, args.output, seg_kv_args, args.verbose)
+            print(f"\t\t{WHITE}[1/4]{C_END} Segmentation")
+        seg_root, n_avi = run_segmentation(args.segment_bin, args.input, args.output, seg_kv_args, args.verbose)
 
 
 
 
-    #####################################################################
-    # 2) Classification                                                 #
-    #####################################################################
-    if args.verbose:
-        print(f"\t\t{WHITE}[2/4]{C_END} Classification")
-    class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
+        #####################################################################
+        # 2) Classification                                                 #
+        #####################################################################
+        if args.verbose:
+            print(f"\t\t{WHITE}[2/4]{C_END} Classification")
+        class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
 
 
 
-    #####################################################################
-    # 3) occurrence creation                                            #
-    #####################################################################
-    if args.verbose:
-        print(f"\t\t{WHITE}[3/4]{C_END} Occurrence Creation")
-        print(f"\t\t\t   {WHITE}Info:{C_END} Merging classification with measurement")
+        #####################################################################
+        # 3) occurrence creation                                            #
+        #####################################################################
+        if args.verbose:
+            print(f"\t\t{WHITE}[3/4]{C_END} Occurrence Creation")
+            print(f"\t\t\t   {WHITE}Info:{C_END} Merging classification with measurement")
 
-    output_dir = args.output
-    measure_root = os.path.join(output_dir, "measurements")
-    classi_root = os.path.join(output_dir, "classification")
+        output_dir = args.output
+        measure_root = os.path.join(output_dir, "measurements")
+        classi_root = os.path.join(output_dir, "classification")
 
-    if os.path.exists(classi_root) and os.path.exists(measure_root):
-        print(f"\t\t\t   {WHITE}Info:{C_END} The measure_root or classi_root does exist")
-        combined_occ = build_occurrence(output_dir, verbose=args.verbose)
-    else:
-        print(f"\t\t\t{RED}  Error:{C_END} The measure_root or classi_root does not exist")
-        combined_occ = None
-        #combined_occ = ""
-
-
-
-    #####################################################################
-    # 4) Final merge with environmental                                 #
-    #####################################################################
-    if args.verbose:
-        print(f"\t\t{WHITE}[4/4]{C_END} Final Merge of Data")
-
-    if os.path.exists(combined_occ) and os.path.exists(env_out_file):
-        print(f"\t\t\t   {WHITE}Info:{C_END} There are occurrence files or environment files ")
-        final_csv = create_final(args.input, args.output, combined_occ, env_out_file, max_time_gap=2, verbose=args.verbose)
-    else:
-        print(f"\t\t\t{RED}  Error:{C_END} There are missing occurrence files or environment files ")
-        final_csv = None
+        if os.path.exists(classi_root) and os.path.exists(measure_root):
+            print(f"\t\t\t   {WHITE}Info:{C_END} The measure_root or classi_root does exist")
+            combined_occ = build_occurrence(output_dir, verbose=args.verbose)
+        else:
+            print(f"\t\t\t{RED}  Error:{C_END} The measure_root or classi_root does not exist")
+            combined_occ = None
+            #combined_occ = ""
 
 
 
-    
+        #####################################################################
+        # 4) Final merge with environmental                                 #
+        #####################################################################
+        if args.verbose:
+            print(f"\t\t{WHITE}[4/4]{C_END} Final Merge of Data")
+
+        if os.path.exists(combined_occ) and os.path.exists(env_out_file):
+            print(f"\t\t\t   {WHITE}Info:{C_END} There are occurrence files or environment files ")
+            final_csv = create_final(args.input, args.output, combined_occ, env_out_file, max_time_gap=2, verbose=args.verbose)
+        else:
+            print(f"\t\t\t{RED}  Error:{C_END} There are missing occurrence files or environment files ")
+            final_csv = None
+
+    elif args.command == "segment":
+        if args.verbose:
+            print(f"\t\t{WHITE}[1/4]{C_END} Segmentation")
+        seg_root, n_avi = run_segmentation(args.segment_bin, args.input, args.output, seg_kv_args, args.verbose)
+
+    elif args.command == "classify":
+        if args.verbose:
+            print(f"\t\t{WHITE}[2/4]{C_END} Classification")
+        seg_root = args.input
+        class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
+
+
     #####################################################################
     # End of the run                                                    #
     #####################################################################
     # Summary
     print("", file=sys.stdout, flush=True)
     print(f"\t{GREEN}Pipeline complete!{C_END}")
-    print(f"\t\t{WHITE}Environmental Merge:{C_END} {env_out_file}")
-    print(f"\t\t{WHITE}    Segmented files:{C_END} {n_avi}")
-    print(f"\t\t{WHITE}  Classified Images:{C_END} {n_imgs}")
-    print(f"\t\t{WHITE}Combined occurrence:{C_END} {combined_occ}")
-    print(f"\t\t{WHITE}  Final merged file:{C_END} {final_csv}")
-    print(f"\t\t{WHITE}   Output directory:{C_END} {args.output}")
-    print(f"\t\t{WHITE}      Total runtime:{C_END} {datetime.now() - t0}")
+    
+    if args.command is None:
+        print(f"\t\t{WHITE}Environmental Merge:{C_END} {env_out_file}")
+        print(f"\t\t{WHITE}Segmented files:{C_END} {n_avi}")
+        print(f"\t\t{WHITE}Classified Images:{C_END} {n_imgs}")
+        print(f"\t\t{WHITE}Combined occurrence:{C_END} {combined_occ}")
+        print(f"\t\t{WHITE}Final merged file:{C_END} {final_csv}")
+
+    elif args.command == "segment":
+        print(f"\t\t{WHITE}Segmented files:{C_END} {n_avi}")
+
+    elif args.command == "classify":
+        print(f"\t\t{WHITE}Classified Images:{C_END} {n_imgs}")
+
+    print(f"\t    {WHITE}   Output directory:{C_END} {args.output}")
+    print(f"\t    {WHITE}      Total runtime:{C_END} {datetime.now() - t0}")
     print("", file=sys.stdout, flush=True)
 
-    
 if __name__ == "__main__":
     main()
