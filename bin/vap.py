@@ -44,6 +44,7 @@ import subprocess
 import shutil
 import itertools as _it
 import textwrap
+import configparser
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -946,6 +947,19 @@ def run_create_final(input_dir, output_dir, occurrence_file, environmental_file,
     return final_output
 
 #####################################################################
+# config file                                                              #
+#####################################################################
+
+def getVarFromFile(filename):
+
+    config = configparser.ConfigParser()
+    config.read(filename)
+
+    config_dict = dict(config["Configuration"])
+    seg_dict = dict(config["Segmentation"])
+    return config_dict, seg_dict
+
+#####################################################################
 # Menu                                                              #
 #####################################################################
 class CustomArgumentParser(argparse.ArgumentParser):
@@ -954,8 +968,8 @@ class CustomArgumentParser(argparse.ArgumentParser):
         print(f"ERROR: {self.prog}: {message}", file=sys.stderr)
         # Optionally print the help message
         self.print_help(sys.stderr)
-        # Exit with a custom status code (e.g., 2)
-        sys.exit(2) 
+        # Exit with a custom status code (e.g., 1)
+        sys.exit(1) 
 
 def menu():
     parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
@@ -967,7 +981,9 @@ def menu():
     parser.add_argument("-en","--environmental", required=False, help="Path to environmental data directory (publisher subdirs inside)")
     parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
-    parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+    parser.add_argument("-c","--config", type=str, default="conf/vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+    parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument('-help', action="help", help="Help Message")
 
     #####################################################################
     # use subcommands                                           #
@@ -978,7 +994,8 @@ def menu():
     segment_parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
     segment_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     segment_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
-    segment_parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+    segment_parser.add_argument("-c","--config", type=str, default="conf/vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+    segment_parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
 
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("-i","--input", required=False, help="Input folder containing segmentatin folder of avi")
@@ -986,29 +1003,11 @@ def menu():
     classify_parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     classify_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     classify_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
-    classify_parser.add_argument("-c","--config", type=str, default="vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+    classify_parser.add_argument("-c","--config", type=str, default="conf/vap.conf", help="Config File To Use over Command Line Options (default: vap.conf)")
+    classify_parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
 
-    #####################################################################
-    # Segmentation parameters                                           #
-    #####################################################################
-    parser.add_argument("-d", "--delta", type=str, default="4", help="Segmentation parameter -d / --delta (Default: 4)")
-    parser.add_argument("-m", "--min-area", type=str, default="50", help="Segmentation parameter -m / --minArea (Default: 50)")
-    parser.add_argument("-M","--max-area", type=str, default="400000", help="Segmentation parameter -M / --maxArea (Default: 400000)")
-    parser.add_argument("-T","--threshold", type=str, default="160", help="Segmentation parameter -T / --threshold (Default: 160)")
-    parser.add_argument("-s","--signal-to-noise", type=str, default="60", help="Segmentation parameter -s / --signal-to-noise (Default: 60)")
-    parser.add_argument("-p","--outlier-percent", type=str, default="0.15", help="Segmentation parameter -p / --outlier-percent (Default: 0.15)")
-    parser.add_argument("-v","--variation", type=str, default="100", help="Segmentation parameter -v / --variation (Default: 100)")
-    parser.add_argument("-e","--epsilon", type=str, default="1", help="Segmentation parameter -e / --epsilon (Default: 1)")
-    parser.add_argument("-t","--top-crop", type=str, default="0", help="Segmentation parameter -t / --top-crop (Default: 0)")
-    parser.add_argument("-b","--bottom-crop", type=str, default="0", help="Segmentation parameter -b / --bottom-crop (Default: 0)")
-    parser.add_argument("-l","--left-crop", type=str, default="66", help="Segmentation parameter -l / --left-crop (Default: 66)")
-    parser.add_argument("-r","--right-crop", type=str, default="23", help="Segmentation parameter -r / --right-crop (Default: 23)")
-
-    parser.add_argument("-vv","--verbose", action="store_true", help="Enable verbose output")
-    parser.add_argument('-help', action="help", help="Help Message")
-
-    global args
     args = parser.parse_args()
+    return args
 
 #####################################################################
 # Main                                                              #
@@ -1019,7 +1018,38 @@ def main():
     #                         Start of Program                          #
     #                                                                   #
     #####################################################################
-    menu()
+    args = menu()
+    config_dict, seg_dict = getVarFromFile
+
+    #options
+    if args.config:
+        input_dir = config_dict["input"]
+        segment_bin = config_dict["segment-bin"]
+        ai_model = config_dict["ai_model"]
+        weights = config_dict["weights"]
+        modelopt = config_dict["modelopt"]
+        environmental = config_dict["environmental"]
+        output_dir = config_dict["output"]
+        gpu = config_dict["gpu"]
+        verbose = config_dict["verbose"]
+
+        #segmentation options
+        delta = seg_dict["delta"]
+        min_area = seg_dict["min-area"]
+        max_area = seg_dict["max-area"]
+        threshold = seg_dict["threshold"]
+        signal_to_noise = seg_dict["signal-to-noise"]
+        outlier_percent = seg_dict["outlier-percent"]
+        variation = seg_dict["variation"]
+        epsilon = seg_dict["epsilon"]
+        top_crop = seg_dict["top-crop"]
+        bottom_crop = seg_dict["bottom-crop"]
+        left_crop = seg_dict["left-crop"]
+        right_crop = seg_dict["right-crop"]
+    else:
+        print("configure file is missed")
+        sys.exit(1) 
+
     t0 = datetime.now()
 
     seg_flag_map = {
@@ -1039,8 +1069,8 @@ def main():
 
     seg_kv_args = []
     for attr, short_flag in seg_flag_map.items():
-        val = getattr(args, attr)
-        seg_kv_args.extend([short_flag, str(val)])
+        value = globals()[attr]
+        seg_kv_args.extend([short_flag, str(value)])
 
     #####################################################################
     # Start the run                                                     #
@@ -1059,56 +1089,69 @@ def main():
 
     print(f"\t{GREEN}Starting pipeline at {t0:%Y-%m-%d %H:%M:%S}{C_END}", file=sys.stdout, flush=True)
 
-
     if args.command is None:
-        required = [args.input, args.output, args.environmental, args.segment_bin, args.weights]
-        if any(x is None for x in required):
+        params = {
+            "input_dir": args.input,
+            "segment_bin": args.segment_bin,
+            "ai_model": args.ai_model,
+            "weights": args.weights,
+            "modelopt": args.modelopt,
+            "environmental": args.environmental,
+            "output_dir": args.output,
+            "gpu": args.gpu,
+            "verbose": args.verbose,
+        }
+
+        for name, value in params.items():
+            if value is not None:
+                globals()[name] = value
+        if any(x is None for x in [input_dir, segment_bin, output_dir, weights, environmental]):
             parser.error(f"\t\t{RED} Error:{C_END} Full pipeline requires --inpu --output --enviromental --segment_bin --weights")
+
         #####################################################################
         # 0) Environmental merge                                            #
         #####################################################################
-        if args.verbose:
+        if verbose:
             print(f"\t\t{WHITE}[0/4]{C_END} Environmental data merge")
-        env_merged_path = os.path.join(args.environmental, "merged_environmental.csv")
+        env_merged_path = os.path.join(environmental, "merged_environmental.csv")
         if (not os.path.exists(env_merged_path)) or os.path.getsize(env_merged_path) == 0:
-            if args.verbose:
+            if verbose:
                 print(f"\t\t\t   {WHITE}Info:{C_END} No merged environmental file found; building merged_environmental.csv ...")
-            env_out_file = run_merge_environmental(args.environmental, output_dir=args.environmental, verbose=args.verbose)
+            env_out_file = run_merge_environmental(environmental, output_dir=environmental, verbose=verbose)
             #env_out_file = ""
         else:
-            if args.verbose:
+            if verbose:
                 print(f"\t\t\t   {WHITE}Info:{C_END} Found existing merged_environmental.csv — skipping environmental merge.")
-            environmental_dir = os.path.abspath(args.environmental)
+            environmental_dir = os.path.abspath(environmental)
             env_out_file = os.path.join(environmental_dir, "merged_environmental.csv")
 
         #####################################################################
         # 1) Segmentation                                                   #
         #####################################################################
-        if args.verbose:
+        if verbose:
             print(f"\t\t{WHITE}[1/4]{C_END} Segmentation")
-        seg_root, n_avi = run_segmentation(args.segment_bin, args.input, args.output, seg_kv_args, args.verbose)
+        seg_root, n_avi = run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args, verbose=verbose)
 
         #####################################################################
         # 2) Classification                                                 #
         #####################################################################
-        if args.verbose:
+        if verbose:
             print(f"\t\t{WHITE}[2/4]{C_END} Classification")
-        class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
+        class_root, n_imgs = run_classification(weights, seg_root, output_dir, gpu, verbose=verbose)
 
         #####################################################################
         # 3) occurrence creation                                            #
         #####################################################################
-        if args.verbose:
+        if verbose:
             print(f"\t\t{WHITE}[3/4]{C_END} Occurrence Creation")
             print(f"\t\t\t   {WHITE}Info:{C_END} Merging classification with measurement")
 
-        output_dir = args.output
         measure_root = os.path.join(output_dir, "measurements")
         classi_root = os.path.join(output_dir, "classification")
 
         if os.path.exists(classi_root) and os.path.exists(measure_root):
             print(f"\t\t\t   {WHITE}Info:{C_END} The measure_root or classi_root does exist")
-            combined_occ = run_build_occurrence(output_dir, verbose=args.verbose)
+            combined_occ = run_build_occurrence(output_dir, verbose=verbose)
         else:
             print(f"\t\t\t{RED}  Error:{C_END} The measure_root or classi_root does not exist")
             combined_occ = None
@@ -1117,26 +1160,52 @@ def main():
         #####################################################################
         # 4) Final merge with environmental                                 #
         #####################################################################
-        if args.verbose:
+        if verbose:
             print(f"\t\t{WHITE}[4/4]{C_END} Final Merge of Data")
 
         if os.path.exists(combined_occ) and os.path.exists(env_out_file):
             print(f"\t\t\t   {WHITE}Info:{C_END} There are occurrence files or environment files ")
-            final_csv = run_create_final(args.input, args.output, combined_occ, env_out_file, max_time_gap=2, verbose=args.verbose)
+            final_csv = run_create_final(input_dir, output_dir, combined_occ, env_out_file, max_time_gap=2, verbose=verbose)
         else:
             print(f"\t\t\t{RED}  Error:{C_END} There are missing occurrence files or environment files ")
             final_csv = None
 
     elif args.command == "segment":
-        if args.verbose:
+        params = {
+            "input_dir": args.input,
+            "segment_bin": args.segment_bin,
+            "output_dir": args.output,
+            "gpu": args.gpu,
+            "verbose": args.verbose,
+        }
+
+        for name, value in params.items():
+            if value is not None:
+                globals()[name] = value    
+        
+        if verbose:
             print(f"\t\t{WHITE}[1/4]{C_END} Segmentation")
-        seg_root, n_avi = run_segmentation(args.segment_bin, args.input, args.output, seg_kv_args, args.verbose)
+        seg_root, n_avi = run_segmentation(segment_bin, input_dir, output_dir, seg_kv_args, verbose=verbose)
 
     elif args.command == "classify":
-        if args.verbose:
+        params = {
+            "input_dir": args.input,
+            "ai_model": args.ai_model,
+            "weights": args.weights,
+            "modelopt": args.modelopt,
+            "output_dir": args.output,
+            "gpu": args.gpu,
+            "verbose": args.verbose,
+        }
+
+        for name, value in params.items():
+            if value is not None:
+                globals()[name] = value
+
+        if verbose:
             print(f"\t\t{WHITE}[2/4]{C_END} Classification")
-        seg_root = args.input
-        class_root, n_imgs = run_classification(args.weights, seg_root, args.output, args.gpu, args.verbose)
+        seg_root = input_dir
+        class_root, n_imgs = run_classification(weights, seg_root, output_dir, gpu, verbose=verbose)
     
     #####################################################################
     # End of the run                                                    #
@@ -1158,7 +1227,7 @@ def main():
     elif args.command == "classify":
         print(f"\t\t{WHITE}Classified Images:{C_END} {n_imgs}")
 
-    print(f"\t    {WHITE}   Output directory:{C_END} {args.output}")
+    print(f"\t    {WHITE}   Output directory:{C_END} {output_dir}")
     print(f"\t    {WHITE}      Total runtime:{C_END} {datetime.now() - t0}")
     print("", file=sys.stdout, flush=True)
 
