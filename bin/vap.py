@@ -569,8 +569,59 @@ def supports_half(gpu: str = "0") -> bool:
     except Exception:
         return False
 
-def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
+class ImageDataset(Dataset):
+
+    def __init__(self,
+                 corrected_crop_dir,
+                 patterns,
+                 transform):
+
+        self.transform = transform
+
+        self.image_paths = list(
+            itertools.chain.from_iterable(
+                glob.iglob(
+                    os.path.join(
+                        corrected_crop_dir,
+                        f"*.{ext}"
+                    )
+                )
+                for ext in patterns
+            )
+        )
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+
+        path = self.image_paths[idx]
+
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            img = self.transform(img)
+
+        return img, path
+
+def pad_to_square(img):
+    w, h = img.size
+    max_wh = max(w, h)
+
+    pad_w = (max_wh - w) // 2
+    pad_h = (max_wh - h) // 2
+
+    padding = (
+        pad_w,
+        pad_h,
+        max_wh - w - pad_w,
+        max_wh - h - pad_h
+    )
+
+    return ImageOps.expand(img, padding)
+
+def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=False):
     patterns = ["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
+    batchsize = 32
     for ext in patterns:
         if glob.glob(os.path.join(corrected_crop_dir, f"*.{ext}")):
             break
@@ -581,42 +632,124 @@ def classify_one_avi(model, corrected_crop_dir, out_csv, gpu, verbose=False):
 
     if verbose:	
         print(f"\t\t\t{PURP}Running:{C_END} ", corrected_crop_dir)
-
-    # prediction over a folder
-    use_half = supports_half(gpu)
-    class_names = list(model.names.values())
-    wrote_header = False
+    
     n = 0
+    # prediction over a folder
+    if ai_model == 'yolo':
+        use_half = supports_half(gpu)
+        class_names = list(model.names.values())
+        wrote_header = False
 
-    with torch.inference_mode():
-        results = model.predict(
-            corrected_crop_dir,
-            imgsz=640,
-            batch=32,
-            stream=True,
-            half=use_half,
-            device=gpu,
-            verbose=False
+
+        with torch.inference_mode():
+            results = model.predict(
+                corrected_crop_dir,
+                imgsz=640,
+                batch=batchsize,
+                stream=True,
+                half=use_half,
+                device=gpu,
+                verbose=False
+            )
+            with open(out_csv, "w", newline='') as f:
+                writer = csv.writer(f)
+                for res in results:
+                    n += 1
+                    fname = os.path.basename(res.path)
+                    probs = res.probs
+                    prob_list = [float(x) for x in probs.data.tolist()]
+                    if not wrote_header:
+                        writer.writerow(["image"] + class_names)
+                        wrote_header = True
+                    writer.writerow([fname] + prob_list)
+                    if verbose and n % 10000 == 0:
+                        print(f"\t\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
+    
+    else:
+
+        from PIL import Image
+        from torchvision import transforms
+        from torch.utils.data import Dataset, DataLoader
+
+        transform = transforms.Compose([
+            transforms.Lambda(pad_to_square),
+            transforms.Resize((299, 299)),
+            transforms.ToTensor()
+        ])
+
+        if hasattr(model, "names"):
+            class_names = list(model.names.values())
+
+        else:
+            class_names = None
+
+
+        dataset = ImageDataset(corrected_crop_dir, patterns, transform)
+
+        loader = DataLoader(
+            dataset,
+            batch_size=batchsize,
+            shuffle=False,
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=True
         )
-        with open(out_csv, "w", newline='') as f:
+        model.eval()
+
+        with open(out_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            for res in results:
-                n += 1
-                fname = os.path.basename(res.path)
-                probs = res.probs
-                prob_list = [float(x) for x in probs.data.tolist()]
-                if not wrote_header:
-                    writer.writerow(["image"] + class_names)
-                    wrote_header = True
-                writer.writerow([fname] + prob_list)
-                if verbose and n % 10000 == 0:
-                    print(f"\t\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
+            if class_names is None:
+                writer.writerow(["image"])
+            else:
+                writer.writerow(["image"] + class_names)
+
+            with torch.inference_mode():
+                for batch_tensor, batch_paths in loader:
+                    batch_tensor = batch_tensor.to(gpu, non_blocking=True)
+
+                    outputs = model(batch_tensor)
+                    probs = torch.softmax(outputs, dim=1)
+                    
+                    flush_every = 1000
+                    rows = []
+
+                    for path, prob in zip(batch_paths, probs):
+                        prob_list = prob.detach().cpu().tolist()
+                        rows.append([os.path.basename(path)] + prob_list)
+
+                        n += 1
+
+                        if len(rows) >= flush_every:
+                            writer.writerows(rows)
+                            rows.clear()
+
+                            if verbose and n % 10000 == 0:
+                                print(
+                                    f"\t\t\t{WHITE}Progress:{C_END} "
+                                    f"Classified {n} images\r"
+                                )
+                    if rows:
+                        writer.writerows(rows)
     return n
 
-def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
+def run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=False):
     class_root = os.path.join(output_dir, "classification")
     os.makedirs(class_root, exist_ok=True)
-    model = YOLO(model_path)
+    if ai_model == "yolo":
+        model = YOLO(weights)
+
+    elif ai_model == "inceptionv3":
+        from torchvision.models import inception_v3
+        model = inception_v3(num_classes=nclass)
+        model.load_state_dict(torch.load(weights, map_location=gpu))
+        model.to(gpu)
+        model.eval()
+
+    elif ai_model == "megadetector":
+        model = YOLO(weights)
+
+    else:
+        raise ValueError(f"Unsupported ai_model: {ai_model}")
 
     avi_dirs = [d for d in glob.glob(os.path.join(seg_root, "*")) if os.path.isdir(d)]
     if verbose:
@@ -631,7 +764,7 @@ def run_classification(model_path, seg_root, output_dir, gpu, verbose=False):
                 print(f"\t\t\t{YELGRN}Warning:{C_END} Skipping {avi_base}: no corrected_crop found")
             continue
         out_csv = os.path.join(avi_dir, f"{avi_base}_classification.csv")
-        n = classify_one_avi(model, corrected_crop, out_csv, gpu, verbose=verbose)
+        n = classify_one_avi(model, ai_model, corrected_crop, out_csv, gpu, verbose=verbose)
         total_imgs += n
         if n > 0:
             #classi_csv.append(out_csv)
