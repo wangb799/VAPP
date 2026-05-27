@@ -47,6 +47,10 @@ import textwrap
 import configparser
 from datetime import datetime, timedelta
 from collections import defaultdict
+from torchvision.models import inception_v3
+from PIL import Image
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
 
 #####################################################################
 # Third-party libraries                                             #
@@ -667,10 +671,6 @@ def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=
     
     else:
 
-        from PIL import Image
-        from torchvision import transforms
-        from torch.utils.data import Dataset, DataLoader
-
         transform = transforms.Compose([
             transforms.Lambda(pad_to_square),
             transforms.Resize((299, 299)),
@@ -692,20 +692,24 @@ def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=
             shuffle=False,
             num_workers=8,
             pin_memory=True,
-            persistent_workers=True
         )
         model.eval()
 
         with open(out_csv, "w", newline="") as f:
             writer = csv.writer(f)
             if class_names is None:
-                writer.writerow(["image"])
+                writer.writerow(
+                ["image"] +
+                [f"class_{i}" for i in range(model.nclass)]
+            )
             else:
                 writer.writerow(["image"] + class_names)
 
             with torch.inference_mode():
+                device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
                 for batch_tensor, batch_paths in loader:
-                    batch_tensor = batch_tensor.to(gpu, non_blocking=True)
+
+                    batch_tensor = batch_tensor.to(device, non_blocking=True)
 
                     outputs = model(batch_tensor)
                     probs = torch.softmax(outputs, dim=1)
@@ -735,15 +739,24 @@ def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=
 def run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=False):
     class_root = os.path.join(output_dir, "classification")
     os.makedirs(class_root, exist_ok=True)
+    device = torch.device(
+    f"cuda:{gpu}" if torch.cuda.is_available() else "cpu"
+    )
     if ai_model == "yolo":
         model = YOLO(weights)
 
     elif ai_model == "inceptionv3":
-        from torchvision.models import inception_v3
-        model = inception_v3(num_classes=nclass)
-        model.load_state_dict(torch.load(weights, map_location=gpu))
-        model.to(gpu)
+        state_dict = torch.load(weights, map_location=device)
+        nclass = state_dict["fc.weight"].shape[0]
+        model = inception_v3(aux_logits=False)
+        model.fc = torch.nn.Linear(
+            model.fc.in_features,
+            nclass
+        )
+        model.load_state_dict(state_dict)
+        model.to(device)
         model.eval()
+        model.nclass = nclass
 
     elif ai_model == "megadetector":
         model = YOLO(weights)
@@ -1110,7 +1123,7 @@ def menu():
     parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
     parser.add_argument("-i","--input", required=False, help="Input folder containing AVI or segmentation ")
     parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
-    parser.add_argument("-ai","--ai-model", required=False, help="AI model (yolo,inceptionv3,megadetector,U-Net)")
+    parser.add_argument("-ai","--ai-model", required=False, default="yolo", help="AI model (yolo,inceptionv3,megadetector,U-Net)")
     parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
     parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     parser.add_argument("-en","--environmental", required=False, help="Path to environmental data directory (publisher subdirs inside)")
@@ -1151,6 +1164,7 @@ def menu():
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("-i","--input", required=False, help="Input folder containing segmentatin folder of avi")
     classify_parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
+    classify_parser.add_argument("-ai","--ai-model", required=False, default="yolo", help="AI model (yolo,inceptionv3,megadetector,U-Net)")
     classify_parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     classify_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     classify_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
@@ -1303,7 +1317,7 @@ def main():
         #####################################################################
         if verbose:
             print(f"\t\t{WHITE}[2/4]{C_END} Classification")
-        class_root, n_imgs = run_classification(weights, seg_root, output_dir, gpu, verbose=verbose)
+        class_root, n_imgs = run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=verbose)
 
         #####################################################################
         # 3) occurrence creation                                            #
@@ -1403,7 +1417,7 @@ def main():
         if verbose:
             print(f"\t\t{WHITE}[2/4]{C_END} Classification")
         seg_root = input_dir
-        class_root, n_imgs = run_classification(weights, seg_root, output_dir, gpu, verbose=verbose)
+        class_root, n_imgs = run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=verbose)
     
     #####################################################################
     # End of the run                                                    #
