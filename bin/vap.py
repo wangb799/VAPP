@@ -45,10 +45,13 @@ import shutil
 import itertools as _it
 import textwrap
 import configparser
+import json
+import ast
+import zipfile
+
 from datetime import datetime, timedelta
 from collections import defaultdict
-from torchvision.models import inception_v3
-from PIL import Image
+from PIL import Image, ImageOps
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 
@@ -583,7 +586,7 @@ class ImageDataset(Dataset):
         self.transform = transform
 
         self.image_paths = list(
-            itertools.chain.from_iterable(
+            _it.chain.from_iterable(
                 glob.iglob(
                     os.path.join(
                         corrected_crop_dir,
@@ -622,6 +625,74 @@ def pad_to_square(img):
     )
 
     return ImageOps.expand(img, padding)
+
+
+def viame_train_info(deploy_zip):
+    """
+    deploy_zip : Path to trained_classifier.zip
+    return dict
+        {
+            "arch": str,
+            "num_classes": int,
+            "class_names": list[str],
+            "channels": str,
+            "mean": list[float],
+            "std": list[float],
+            "input_dims": tuple[int, int],
+            "train_info_path": str,
+            "checkpoint_path": str,
+            "model_py_path": str
+        }
+    """
+    extract_dir = "deployed_model"
+    os.makedirs(extract_dir, exist_ok=False)
+    train_info_path = None
+    checkpoint_path = None
+    model_py_path = None
+
+    with zipfile.ZipFile(deploy_zip, "r") as z:
+        z.extractall(extract_dir)
+        for root, _, files in os.walk(extract_dir):
+            for file in files:
+                full_path = os.path.join(root, file)
+                if file == "train_info.json":
+                    train_info_path = full_path
+
+                elif file == "deploy_snapshot.pt":
+                    checkpoint_path = full_path
+
+                elif file.endswith(".py"):
+                    model_py_path = full_path
+
+        if train_info_path is None:
+            raise FileNotFoundError("train_info.json not found")
+
+        if checkpoint_path is None:
+            raise FileNotFoundError("deploy_snapshot.pt not found")
+
+    with open(train_info_path, "r") as f:
+        info = json.load(f)
+
+    model_cfg = info["hyper"]["model"][1]
+
+    mean = [x[0][0] for x in model_cfg["input_stats"]["mean"]]
+    std = [x[0][0] for x in model_cfg["input_stats"]["std"]]
+
+    cfg = ast.literal_eval(info["extra"]["config"])
+
+    return {
+        "arch": model_cfg["arch"],
+        "num_classes": len(model_cfg["classes"]["idx_to_node"]),
+        "class_names": model_cfg["classes"]["idx_to_node"],
+        "channels": model_cfg["channels"],
+        "mean": mean,
+        "std": std,
+        "input_dims": tuple(cfg["input_dims"]),
+
+        "train_info_path": train_info_path,
+        "checkpoint_path": checkpoint_path,
+        "model_py_path": model_py_path,
+    }
 
 def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=False):
     patterns = ["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
@@ -669,7 +740,18 @@ def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=
                     if verbose and n % 10000 == 0:
                         print(f"\t\t\t{WHITE}Progress:{C_END} Classified {n} images\r")
     
-    else:
+    elif ai_model == "viame":
+        
+        transform = transforms.Compose([
+        transforms.Lambda(pad_to_square),
+        transforms.Resize(model.input_dims),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=model.mean,
+            std=model.std,
+        ),
+    ])
+    elif ai_model == "inceptionv3":
 
         transform = transforms.Compose([
             transforms.Lambda(pad_to_square),
@@ -677,63 +759,66 @@ def classify_one_avi(model, ai_model, corrected_crop_dir, out_csv, gpu, verbose=
             transforms.ToTensor()
         ])
 
-        if hasattr(model, "names"):
-            class_names = list(model.names.values())
+    else:
+        raise ValueError(f"Unsupported ai_model: {ai_model}")
+        
+    if hasattr(model, "class_names"):
+        class_names = model.class_names
+    elif hasattr(model, "names"):
+        class_names = list(model.names.values())
+    else:
+        class_names = None
 
-        else:
-            class_names = None
+    dataset = ImageDataset(corrected_crop_dir, patterns, transform)
 
+    loader = DataLoader(
+        dataset,
+        batch_size=batchsize,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+    )
+    model.eval()
 
-        dataset = ImageDataset(corrected_crop_dir, patterns, transform)
-
-        loader = DataLoader(
-            dataset,
-            batch_size=batchsize,
-            shuffle=False,
-            num_workers=8,
-            pin_memory=True,
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        if class_names is None:
+            writer.writerow(
+            ["image"] +
+            [f"class_{i}" for i in range(model.nclass)]
         )
-        model.eval()
+        else:
+            writer.writerow(["image"] + class_names)
 
-        with open(out_csv, "w", newline="") as f:
-            writer = csv.writer(f)
-            if class_names is None:
-                writer.writerow(
-                ["image"] +
-                [f"class_{i}" for i in range(model.nclass)]
-            )
-            else:
-                writer.writerow(["image"] + class_names)
+        with torch.inference_mode():
+            device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
+            for batch_tensor, batch_paths in loader:
 
-            with torch.inference_mode():
-                device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
-                for batch_tensor, batch_paths in loader:
+                batch_tensor = batch_tensor.to(device, non_blocking=True)
 
-                    batch_tensor = batch_tensor.to(device, non_blocking=True)
+                outputs = model(batch_tensor)
+                probs = torch.softmax(outputs, dim=1)
+                
+                flush_every = 1000
+                rows = []
 
-                    outputs = model(batch_tensor)
-                    probs = torch.softmax(outputs, dim=1)
-                    
-                    flush_every = 1000
-                    rows = []
+                for path, prob in zip(batch_paths, probs):
+                    prob_list = prob.detach().cpu().tolist()
+                    rows.append([os.path.basename(path)] + prob_list)
 
-                    for path, prob in zip(batch_paths, probs):
-                        prob_list = prob.detach().cpu().tolist()
-                        rows.append([os.path.basename(path)] + prob_list)
+                    n += 1
 
-                        n += 1
-
-                        if len(rows) >= flush_every:
-                            writer.writerows(rows)
-                            rows.clear()
-
-                            if verbose and n % 10000 == 0:
-                                print(
-                                    f"\t\t\t{WHITE}Progress:{C_END} "
-                                    f"Classified {n} images\r"
-                                )
-                    if rows:
+                    if len(rows) >= flush_every:
                         writer.writerows(rows)
+                        rows.clear()
+
+                        if verbose and n % 10000 == 0:
+                            print(
+                                f"\t\t\t{WHITE}Progress:{C_END} "
+                                f"Classified {n} images\r"
+                            )
+                if rows:
+                    writer.writerows(rows)
     return n
 
 def run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=False):
@@ -744,8 +829,60 @@ def run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=Fal
     )
     if ai_model == "yolo":
         model = YOLO(weights)
+    
+    elif ai_model == "viame":
+        viame_model = viame_train_info(weights)
+
+        arch = viame_model['arch']
+        checkpoint_path = viame_model['checkpoint_path']
+        num_classes = viame_model['num_classes']
+
+        if arch == "resnet50":
+            from torchvision.models import resnet50
+            model = resnet50(weights=None, num_classes=num_classes)
+
+        elif arch == "resnext101":
+            from torchvision.models import resnext101_32x8d
+            model = resnext101_32x8d(weights=None, num_classes=num_classes)
+
+        elif arch == "efficientnetv2s":
+            from torchvision.models import efficientnet_v2_s
+            model = efficientnet_v2_s(weights=None, num_classes=num_classes)
+
+        elif arch == "efficientnetv2m":
+            from torchvision.models import efficientnet_v2_m
+            model = efficientnet_v2_m(weights=None, num_classes=num_classes)
+
+        else:
+            raise ValueError(f"Unsupported VIAME architecture: {arch}")
+
+        checkpoint_data = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+
+        model_state_dict = {}
+        for key, value in checkpoint_data["model_state_dict"].items():
+            if key.startswith("module.input_norm."):
+                continue
+                
+            if key.startswith("module.model."):
+                key = key[len("module.model."):]
+            model_state_dict[key] = value
+
+        model.load_state_dict(model_state_dict, strict=True)
+        model.input_dims = viame_model['input_dims']
+        model.mean = viame_model['mean']
+        model.std = viame_model['std']
+        model.class_names = viame_model['class_names']
+        model.nclass = num_classes
+
+        model.to(device)
+        model.eval()
 
     elif ai_model == "inceptionv3":
+        from torchvision.models import inception_v3
         state_dict = torch.load(weights, map_location=device)
         nclass = state_dict["fc.weight"].shape[0]
         model = inception_v3(aux_logits=False)
@@ -757,9 +894,6 @@ def run_classification(weights, ai_model, seg_root, output_dir, gpu, verbose=Fal
         model.to(device)
         model.eval()
         model.nclass = nclass
-
-    elif ai_model == "megadetector":
-        model = YOLO(weights)
 
     else:
         raise ValueError(f"Unsupported ai_model: {ai_model}")
@@ -1123,8 +1257,8 @@ def menu():
     parser = CustomArgumentParser(description="Full Video Analytics Pipeline: env merge -> segmentation -> classification -> occurrence file ->     final merge")
     parser.add_argument("-i","--input", required=False, help="Input folder containing AVI or segmentation ")
     parser.add_argument("-sb","--segment-bin", required=False, help="Path to segmentation binary")
-    parser.add_argument("-ai","--ai-model", required=False, default="yolo", help="AI model (yolo,inceptionv3,megadetector,U-Net)")
-    parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
+    parser.add_argument("-ai","--ai-model", required=False, default="yolo", help="AI model (yolo,viame,inceptionv3,megadetector,U-Net)")
+    parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt) or viame trained_classifier.zip")
     parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     parser.add_argument("-en","--environmental", required=False, help="Path to environmental data directory (publisher subdirs inside)")
     parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
@@ -1163,8 +1297,8 @@ def menu():
 
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("-i","--input", required=False, help="Input folder containing segmentatin folder of avi")
-    classify_parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt)")
-    classify_parser.add_argument("-ai","--ai-model", required=False, default="yolo", help="AI model (yolo,inceptionv3,megadetector,U-Net)")
+    classify_parser.add_argument("-mw","--weights", required=False, help="Model weights file (.weights,.pt) or viame trained_classifier.zip")
+    classify_parser.add_argument("-ai","--ai-model", required=False, default="yolo", help="AI model (yolo,vimae, inceptionv3,megadetector,U-Net)")
     classify_parser.add_argument("-mo","--modelopt", help="Model Advanced Option (Extra option for the model)")
     classify_parser.add_argument("-o","--output", required=False, help="Output directory (will contain segmentation/, classification/, merge/)")
     classify_parser.add_argument("-g","--gpu", type=str, default="0", help="GPU ID (default: 0)")
@@ -1186,6 +1320,16 @@ def main():
     t0 = datetime.now()
 
     args = menu()
+
+    input_dir = args.input
+    segment_bin = args.segment_bin
+    ai_model = args.ai_model
+    weights = args.weights
+    modelopt = args.modelopt
+    environmental = args.environmental
+    output_dir = args.output
+    gpu = args.gpu
+    verbose = args.verbose
 
     #options
     if args.config:
@@ -1268,7 +1412,7 @@ def main():
             segment_bin = args.segment_bin
 
         if args.ai_model:
-            ai_model = ai_model
+            ai_model = args.ai_model
 
         if args.weights:
             weights = args.weights
@@ -1397,7 +1541,7 @@ def main():
             input_dir = args.input
 
         if args.ai_model:
-            ai_model = ai_model
+            ai_model = args.ai_model
 
         if args.weights:
             weights = args.weights
